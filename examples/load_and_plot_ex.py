@@ -50,7 +50,7 @@ FORK_GAIN = 4.884e-02
 SHOCK_GAIN = 2.442e-02
 
 
-def import_data():
+def import_data() -> pd.DataFrame:
     """Load and parse the example binary data file.
 
     Locates the pre-bundled ``.bin`` file in ``examples/data/``,
