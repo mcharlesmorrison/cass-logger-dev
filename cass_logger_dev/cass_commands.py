@@ -672,7 +672,7 @@ class CassCommands:
     # --- Static and Class Methods
 
     @classmethod
-    def process_data_file(cls, full_filename: Union[str, Path], fw_ver="std"):
+    def process_data_file(cls, full_filename: Union[str, Path], fw_ver="0.0-std"):
         """Parse a binary sensor data file into a pandas DataFrame.
 
         The firmware version string determines which NumPy dtype is used for
@@ -684,8 +684,9 @@ class CassCommands:
         full_filename : str
             Path to the binary file.
         fw_ver : str, optional
-            Firmware version string. Must contain "i2c_2", "i2c_1", or
-            default to "std" (default "std").
+            Full firmware version string. Must contain firmware version (i.e. 0.9, 0.10)
+            and firmware variant (e.g. "i2c_2", "i2c_1") or default to "std".
+            Format is "<version>-<variant>" (e.g. "0.10-i2c_2")
 
         Returns
         -------
@@ -699,14 +700,37 @@ class CassCommands:
         """
         full_filename = Path(full_filename)
 
-        # Match firmware type based on substrings
-        if "i2c_2" in fw_ver:
-            dtype_key = "i2c_2"
-        elif "i2c_1" in fw_ver:
-            dtype_key = "i2c_1"
+        # Extract version and variant from strings like "0.10-i2c_2"
+        match = re.match(r"(\d+\.\d+)-(.+)", fw_ver)
+        if match:
+            version = match.group(1)
+            variant = match.group(2)
         else:
-            dtype_key = "std"
+            raise ValueError(f"Invalid firmware version format: {fw_ver}")
 
+        # Map variant suffix to dtype key.
+        # Variants that share a struct layout map to the same dtype key.
+        VARIANT_DTYPE_MAP = {
+            "std":               "std",
+            "i2c_1":             "i2c_1",
+            "i2c_45686":         "i2c_1",   # same 108-byte layout as i2c_1
+            "i2c_45686_9dof":    "i2c_1",   # same 108-byte layout as i2c_1
+            "i2c_2":             "i2c_2",
+            "i2c_45686_20948":   "i2c_2",   # same 136-byte layout as i2c_2
+        }
+        
+        print(fw_ver)
+
+        # Handle legacy i2c_1 firmware versions (<0.10)
+        version_tuple = tuple(int(p) for p in version.split("."))
+        if (variant == "i2c_1" and version_tuple[0] == 0 and version_tuple[1] < 10):
+            dtype_key = "i2c_1_legacy"
+        else:
+            dtype_key = VARIANT_DTYPE_MAP.get(variant)
+            if dtype_key is None:
+                raise ValueError(f"Unsupported firmware variant '{variant}' (from fw_ver='{fw_ver}')")
+
+        print(dtype_key)
         try:
             dt = FIRMWARE_DTYPES[dtype_key]()
             column_order = COLUMN_ORDERS[dtype_key]

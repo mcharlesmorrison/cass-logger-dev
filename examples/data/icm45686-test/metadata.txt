@@ -1,0 +1,2 @@
+Firmware Ver: 0.10-i2c_45686
+Device ID: cl105
