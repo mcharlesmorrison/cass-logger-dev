@@ -54,9 +54,12 @@ def import_data() -> pd.DataFrame:
     """
     cass_util = cass_commands.CassCommands()
     filepath = str(
-        Path(__file__).parent / "data" / "icm45686-test" / "LOG_1783441299.bin"
+        # Path(__file__).parent / "data" / "icm45686-test" / "LOG_1783441299.bin"
+        # Path(__file__).parent / "data" / "icm45686-test_800" / "LOG_1783444977.bin"
+        Path(__file__).parent / "data" / "icm45686-test-9dof_800" / "LOG_1783509686.bin"
     )
-    fw_ver = "0.10-i2c_45686"
+    # fw_ver = "0.10-i2c_45686"
+    fw_ver = "0.10-i2c_45686_9dof"
 
     return cass_util.process_data_file(filepath, fw_ver)
 
@@ -93,6 +96,27 @@ def plot_pot_data(example_data: pd.DataFrame):
     axs[1].set_ylabel("gy")
     axs[2].set_xlabel("time [s]")
     axs[2].set_ylabel("gz")
+
+    plt.tight_layout()
+    plt.show()
+
+    # New plot for magnetometer data
+    fig, axs = plt.subplots(nrows=3, ncols=1, sharex=True, figsize=(12, 8))
+    for ax in axs:
+        ax.tick_params(axis="x", labelbottom=True)
+    axs[0].plot(example_data["t"], example_data["Tx_i2c"])
+    axs[1].plot(example_data["t"], example_data["Ty_i2c"])
+    axs[2].plot(example_data["t"], example_data["Tz_i2c"])
+
+    # labeling / formatting
+    axs[0].set_title("[Example] Magnetometer")
+    plt.title("Example data plot")
+    axs[0].set_xlabel("time [s]")
+    axs[0].set_ylabel("wx")
+    axs[1].set_xlabel("time [s]")
+    axs[1].set_ylabel("wy")
+    axs[2].set_xlabel("time [s]")
+    axs[2].set_ylabel("wz")
 
     plt.tight_layout()
     plt.show()
