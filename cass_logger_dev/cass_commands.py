@@ -685,8 +685,9 @@ class CassCommands:
             Path to the binary file.
         fw_ver : str, optional
             Full firmware version string. Must contain firmware version (i.e. 0.9, 0.10)
-            and firmware variant (e.g. "i2c_2", "i2c_1") or default to "std".
-            Format is "<version>-<variant>" (e.g. "0.10-i2c_2")
+            and, optionally, firmware variant (e.g. "i2c_2", "i2c_1"); defaults to "std"
+            if omitted. Format is "<version>-<variant>" (e.g. "0.10-i2c_2") or just
+            "<version>" (e.g. "0.9").
 
         Returns
         -------
@@ -700,11 +701,18 @@ class CassCommands:
         """
         full_filename = Path(full_filename)
 
-        # Extract version and variant from strings like "0.10-i2c_2"
-        match = re.match(r"(\d+\.\d+)-(.+)", fw_ver)
+        # Extract version and variant from strings like "0.10-i2c_2" or "0.9"
+        match = re.match(r"(\d+\.\d+)(?:-(.+))?$", fw_ver)
         if match:
             version = match.group(1)
-            variant = match.group(2)
+
+            version_tuple = tuple(int(p) for p in version.split("."))
+            legacy_version = version_tuple[0] == 0 and version_tuple[1] < 10
+
+            if (legacy_version):
+                variant = match.group(2) or "std"
+            else:
+                variant = match.group(2) or ValueError(f"Invalid firmware version format: {fw_ver}")
         else:
             raise ValueError(f"Invalid firmware version format: {fw_ver}")
 
@@ -722,8 +730,7 @@ class CassCommands:
         print(fw_ver)
 
         # Handle legacy i2c_1 firmware versions (<0.10)
-        version_tuple = tuple(int(p) for p in version.split("."))
-        if (variant == "i2c_1" and version_tuple[0] == 0 and version_tuple[1] < 10):
+        if (variant == "i2c_1" and legacy_version):
             dtype_key = "i2c_1_legacy"
         else:
             dtype_key = VARIANT_DTYPE_MAP.get(variant)
