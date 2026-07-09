@@ -701,8 +701,8 @@ class CassCommands:
         """
         full_filename = Path(full_filename)
 
-        # Extract version and variant from strings like "0.10-i2c_2" or "0.9"
-        match = re.match(r"(\d+\.\d+)(?:-(.+))?$", fw_ver)
+        # Extract version and variant from strings like "0.10-i2c_2" or "0.09"
+        match = re.match(r"(\d+\.\d+)(?:-(.+))?$", fw_ver.strip())
         if match:
             version = match.group(1)
             version_tuple = tuple(int(p) for p in version.split("."))
