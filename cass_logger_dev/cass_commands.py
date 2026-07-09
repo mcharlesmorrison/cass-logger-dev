@@ -705,16 +705,11 @@ class CassCommands:
         match = re.match(r"(\d+\.\d+)(?:-(.+))?$", fw_ver)
         if match:
             version = match.group(1)
-
             version_tuple = tuple(int(p) for p in version.split("."))
             legacy_version = version_tuple[0] == 0 and version_tuple[1] < 10
-
-            if (legacy_version):
-                variant = match.group(2) or "std"
-            else:
-                variant = match.group(2) or ValueError(f"Invalid firmware version format: {fw_ver}")
+            variant = match.group(2) or "std"
         else:
-            raise ValueError(f"Invalid firmware version format: {fw_ver}")
+            raise ValueError(f"Invalid firmware version format: '{fw_ver}'")
 
         # Map variant suffix to dtype key.
         # Variants that share a struct layout map to the same dtype key.
@@ -727,8 +722,6 @@ class CassCommands:
             "i2c_45686_20948":   "i2c_2",   # same 136-byte layout as i2c_2
         }
         
-        print(fw_ver)
-
         # Handle legacy i2c_1 firmware versions (<0.10)
         if (variant == "i2c_1" and legacy_version):
             dtype_key = "i2c_1_legacy"
@@ -737,7 +730,6 @@ class CassCommands:
             if dtype_key is None:
                 raise ValueError(f"Unsupported firmware variant '{variant}' (from fw_ver='{fw_ver}')")
 
-        print(dtype_key)
         try:
             dt = FIRMWARE_DTYPES[dtype_key]()
             column_order = COLUMN_ORDERS[dtype_key]
