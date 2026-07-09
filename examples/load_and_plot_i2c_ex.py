@@ -50,15 +50,11 @@ def import_data() -> pd.DataFrame:
     -------
     pd.DataFrame
         Parsed sensor data with columns including ``t`` (seconds),
-        ``a0`` (fork pot ADC counts), and ``b0`` (shock pot ADC counts).
     """
     cass_util = cass_commands.CassCommands()
     filepath = str(
-        # Path(__file__).parent / "data" / "icm45686-test" / "LOG_1783441299.bin"
-        # Path(__file__).parent / "data" / "icm45686-test_800" / "LOG_1783444977.bin"
-        Path(__file__).parent / "data" / "icm45686-test-9dof_800" / "LOG_1783509686.bin"
+        Path(__file__).parent / "data" / "icm45686-test-9dof_800" / "LOG_1783595119.bin"
     )
-    # fw_ver = "0.10-i2c_45686"
     fw_ver = "0.10-i2c_45686_9dof"
 
     return cass_util.process_data_file(filepath, fw_ver)
@@ -83,9 +79,6 @@ def plot_pot_data(example_data: pd.DataFrame):
     axs[0].plot(example_data["t"], example_data["gx_i2c"])
     axs[1].plot(example_data["t"], example_data["gy_i2c"])
     axs[2].plot(example_data["t"], example_data["gz_i2c"])
-    # axs[0].plot(example_data["t"], example_data["gx"])
-    # axs[1].plot(example_data["t"], example_data["gy"])
-    # axs[2].plot(example_data["t"], example_data["gz"])
 
     # labeling / formatting
     axs[0].set_title("[Example] Accelerometer")
