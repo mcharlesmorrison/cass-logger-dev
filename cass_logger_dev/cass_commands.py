@@ -672,7 +672,7 @@ class CassCommands:
     # --- Static and Class Methods
 
     @classmethod
-    def process_data_file(cls, full_filename: Union[str, Path], fw_ver="0.0-std"):
+    def process_data_file(cls, full_filename: Union[str, Path], fw_ver="0.09-std"):
         """Parse a binary sensor data file into a pandas DataFrame.
 
         The firmware version string determines which NumPy dtype is used for
@@ -684,10 +684,10 @@ class CassCommands:
         full_filename : str
             Path to the binary file.
         fw_ver : str, optional
-            Full firmware version string. Must contain firmware version (i.e. 0.9, 0.10)
+            Full firmware version string. Must contain firmware version (i.e. 0.09, 0.10)
             and, optionally, firmware variant (e.g. "i2c_2", "i2c_1"); defaults to "std"
             if omitted. Format is "<version>-<variant>" (e.g. "0.10-i2c_2") or just
-            "<version>" (e.g. "0.9").
+            "<version>" (e.g. "0.09-std"). Defaults to "0.09-std" (std firmware) if omitted.
 
         Returns
         -------
