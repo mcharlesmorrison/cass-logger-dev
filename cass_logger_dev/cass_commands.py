@@ -980,8 +980,16 @@ class CassCommands:
         ser_obj : serial.Serial
             The serial port instance to flush.
         """
-        ser_obj.reset_input_buffer()
-        ser_obj.flush()
+        try:
+            ser_obj.reset_input_buffer()
+            ser_obj.flush()
+        except OSError:
+            # macOS can mark the fd stale (ENXIO) while pyserial still reports
+            # is_open=True. Close and reopen the same port to recover.
+            ser_obj.close()
+            ser_obj.open()
+            ser_obj.reset_input_buffer()
+            ser_obj.flush()
 
     def _flush_all(self):
         self._flush_ser_port(self.ser_data)
