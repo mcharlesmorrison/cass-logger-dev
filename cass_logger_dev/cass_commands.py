@@ -677,6 +677,7 @@ class CassCommands:
         "std":               "std",
         "i2c_1":             "i2c_1",
         "i2c_45686":         "i2c_1",   # same 108-byte layout as i2c_1
+        "i2c_45686_9dof":    "i2c_1",   # same 108-byte layout as i2c_1 (legacy 9dof naming - it's now just i2c_45686)
         "i2c_2":             "i2c_2",
         "i2c_45686_2":       "i2c_2",   # same 136-byte layout as i2c_2
     }
