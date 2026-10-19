@@ -27,6 +27,13 @@ from .firmware_structs import (
     FIRMWARE_DTYPES,
     COLUMN_ORDERS,
 )
+from .live import (
+    FRAME_SNAPSHOT,
+    FrameParser,
+    Snapshot,
+    decode_frame,
+    supports_live_view,
+)
 from typing import Optional, Union, Dict, List
 import re
 import platform
@@ -300,13 +307,7 @@ class CassCommands:
         self._flush_all()
 
         self.ser_command.write(b"h")
-        unix_time = ""
-        while True:
-            char = self.ser_data.read(1).decode("utf-8")
-            if char == "x":
-                break
-            unix_time += char
-        return unix_time
+        return self._read_until(b"x").decode("utf-8")
 
     def list_files(self):
         """List all files stored on the device SD card.
@@ -576,15 +577,11 @@ class CassCommands:
         self._flush_all()
 
         self.ser_command.write(b"g")
-        device_ID = b""
-        while b"x" not in device_ID:
-            if self.ser_data.in_waiting > 0:
-                device_ID += self.ser_data.read(self.ser_data.in_waiting)
-        device_ID = device_ID.decode("utf-8")
+        device_ID = self._read_until(b"x").decode("utf-8")
 
         self._close_serial()
 
-        return device_ID[:-1]
+        return device_ID
 
     def put_rtc_install_timestamp(self, unix_install=None):
         """Write the RTC battery install timestamp to EEPROM.
@@ -637,12 +634,7 @@ class CassCommands:
         self._open_serial()
 
         self.ser_command.write(b"i")
-        rtc_install = b""
-        while b"x" not in rtc_install:
-            if self.ser_data.in_waiting > 0:
-                rtc_install += self.ser_data.read(self.ser_data.in_waiting)
-        rtc_install = rtc_install.decode("utf-8")
-        rtc_install = rtc_install[:-1]
+        rtc_install = self._read_until(b"x").decode("utf-8")
         self._close_serial()
 
         dt = datetime.datetime.fromtimestamp(int(rtc_install))
@@ -661,13 +653,97 @@ class CassCommands:
         self._flush_all()
 
         self.ser_command.write(b"a")
-        fw_ver = b""
-        while b"x" not in fw_ver:
-            if self.ser_data.in_waiting > 0:
-                fw_ver += self.ser_data.read(self.ser_data.in_waiting)
-        fw_ver = fw_ver.decode("utf-8")
+        fw_ver = self._read_until(b"x").decode("utf-8")
         self._close_serial()
-        return fw_ver[:-1]
+        return fw_ver
+
+    def snapshot(
+        self,
+        fw_ver: str,
+        timeout: float = 0.25,
+        parser: Optional[FrameParser] = None,
+    ) -> Snapshot:
+        """Request one live view snapshot (``'k'``) and wait for the reply.
+
+        Low-level call for repeated polling: the ports are left open between
+        calls (no flush, no close). Needs firmware 0.12 or newer; older
+        firmware ignores ``'k'``, so this raises ``TimeoutError``. Use
+        ``supports_live_view(fw_ver)`` to check first.
+
+        Parameters
+        ----------
+        fw_ver : str
+            Full firmware version string (e.g. "0.12-i2c_2"), used to decode
+            the payload.
+        timeout : float, optional
+            Seconds to wait for the reply (default 0.25).
+        parser : FrameParser, optional
+            Reuse a parser across calls to keep its error counts
+            (``parser.stats``). Its buffer is reset on every call.
+
+        Returns
+        -------
+        Snapshot
+            ``values`` is None when the device is recording (``logging``).
+
+        Raises
+        ------
+        TimeoutError
+            If no frame arrives within ``timeout``. The data port input buffer
+            is cleared so a late frame can't leak into the next reply.
+        ValueError
+            If the payload size doesn't match the ``fw_ver`` variant.
+        """
+        ser_data = self.ser_data
+        ser_command = self.ser_command
+        if parser is None:
+            parser = FrameParser()
+        parser.reset()
+
+        # Drop stale bytes so an old frame can't be mistaken for this reply.
+        if ser_data.in_waiting:
+            ser_data.reset_input_buffer()
+
+        ser_command.write(b"k")
+        deadline = time.monotonic() + timeout
+        while True:
+            n = ser_data.in_waiting
+            if n:
+                for frame in parser.feed(ser_data.read(n)):
+                    if frame.frame_type == FRAME_SNAPSHOT:
+                        return decode_frame(frame, fw_ver)
+            if time.monotonic() > deadline:
+                ser_data.reset_input_buffer()
+                parser.reset()
+                hint = (
+                    ""
+                    if supports_live_view(fw_ver)
+                    else f" Firmware '{fw_ver}' is too old for live view (needs 0.12+)."
+                )
+                raise TimeoutError(f"No snapshot reply within {timeout:.2f} s.{hint}")
+            if not n:
+                time.sleep(0.001)
+
+    def get_snapshot(self, fw_ver: Optional[str] = None, timeout: float = 0.5) -> Snapshot:
+        """Take a single live view snapshot.
+
+        Flushes the ports, requests one snapshot, then closes the ports, like
+        the other one-shot commands. For repeated polling use ``snapshot()``.
+
+        Parameters
+        ----------
+        fw_ver : str, optional
+            Full firmware version string. Read from the device if omitted.
+        timeout : float, optional
+            Seconds to wait for the reply (default 0.5).
+        """
+        if fw_ver is None:
+            fw_ver = self.get_fw_ver()
+        self._flush_all()
+        try:
+            return self.snapshot(fw_ver, timeout=timeout)
+        finally:
+            self._close_serial()
 
     # --- Static and Class Methods
 
@@ -993,6 +1069,35 @@ class CassCommands:
     def _flush_all(self):
         self._flush_ser_port(self.ser_data)
         self._flush_ser_port(self.ser_command)
+
+    def _read_until(self, terminator: bytes, timeout: float = 2.0) -> bytes:
+        """Read from the data port until ``terminator`` arrives.
+
+        Returns the bytes before the terminator. Anything read after it is
+        discarded.
+
+        Raises
+        ------
+        TimeoutError
+            If the terminator doesn't arrive within ``timeout`` seconds. The
+            data port input buffer is cleared so a late reply can't leak into
+            the next command.
+        """
+        ser = self.ser_data
+        result = b""
+        deadline = time.monotonic() + timeout
+        while terminator not in result:
+            n = ser.in_waiting
+            if n:
+                result += ser.read(n)
+            elif time.monotonic() > deadline:
+                ser.reset_input_buffer()
+                raise TimeoutError(
+                    f"Timed out after {timeout:.1f} s waiting for the device's reply."
+                )
+            else:
+                time.sleep(0.001)
+        return result.split(terminator, 1)[0]
 
     def _reset_buff(self, reset_pos, filename):
         START_MARKER = b"\xff\xfe\xfd"

@@ -30,6 +30,7 @@ Python package for developers to interface with the Cass Logger. This package al
    |--------|-------------|
    | `examples/load_and_plot_ex.py` | Load a pre-downloaded `.bin` file from `examples/data/` and plot potentiometer (fork/shock) data |
    | `examples/download_and_plot_ex.py` | Download data from a connected device, then plot internal IMU (accelerometer) data |
+   | `examples/live_view_ex.py` | Firmware bench tool: poll live snapshots at `--rate` Hz and print every channel plus error counts (needs firmware 0.12+) |
 
    **macOS / Linux:**
    ```bash
@@ -80,3 +81,18 @@ cass_utils = CassCommands()
 | Set device ID | `cass_utils.put_device_ID(id)` | Writes a device identifier string to EEPROM |
 | Get RTC install time | `cass_utils.get_rtc_install_timestamp()` | Reads the RTC battery install timestamp from EEPROM |
 | Set RTC install time | `cass_utils.put_rtc_install_timestamp()` | Writes the RTC battery install timestamp to EEPROM (defaults to now) |
+
+### Live View
+
+| Operation | Method | Description |
+|-----------|--------|-------------|
+| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError` |
+
+Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-view-plan.md` for the spec.
+
+## 🧪 Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
