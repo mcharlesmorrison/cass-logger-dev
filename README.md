@@ -81,6 +81,7 @@ cass_utils = CassCommands()
 | Set device ID | `cass_utils.put_device_ID(id)` | Writes a device identifier string to EEPROM |
 | Get RTC install time | `cass_utils.get_rtc_install_timestamp()` | Reads the RTC battery install timestamp from EEPROM |
 | Set RTC install time | `cass_utils.put_rtc_install_timestamp()` | Writes the RTC battery install timestamp to EEPROM (defaults to now) |
+| Get logger status | `cass_utils.get_status()` | Status report for the most recent recording, as a dict (MB written, duration, write times, `buffer_overflows`). Run after stopping a recording with USB connected; `buffer_overflows` should be 0 (it's `None` on firmware before 0.12) |
 
 ### Live View
 

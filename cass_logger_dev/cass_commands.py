@@ -657,6 +657,60 @@ class CassCommands:
         self._close_serial()
         return fw_ver
 
+    def get_status(self, timeout: float = 2.0) -> Dict[str, Optional[float]]:
+        """Read the logger status report for the most recent recording.
+
+        Call after stopping a recording (with USB still connected) to check it
+        ran cleanly: ``buffer_overflows`` should be 0. The values describe the
+        last recording and are lost on power-off.
+
+        Parameters
+        ----------
+        timeout : float, optional
+            Seconds to wait for the report (default 2.0).
+
+        Returns
+        -------
+        dict
+            ``mbytes_written``, ``collection_time_s``, ``max_collection_delay_us``,
+            ``buffer_overflows``, ``avg_write_time_ms``, ``max_write_time_ms``.
+            ``buffer_overflows`` is None on firmware older than 0.12, which
+            doesn't report it.
+
+        Raises
+        ------
+        TimeoutError
+            If the report doesn't arrive within ``timeout``.
+        """
+        self._flush_all()
+
+        self.ser_command.write(b"s")
+        # The report's last line is "Maximum Write Time: <x> milliseconds\n\n";
+        # the average line has only a single newline after "milliseconds".
+        report = self._read_until(b"milliseconds\n\n", timeout=timeout).decode(
+            "utf-8", errors="replace"
+        )
+        self._close_serial()
+
+        fields = {
+            "mbytes_written": r"MBytes Written:\s*([\d.]+)",
+            "collection_time_s": r"Collection time:\s*(\d+)",
+            "max_collection_delay_us": r"Max Collection delay:\s*(\d+)",
+            "buffer_overflows": r"Buffer overflows:\s*(\d+)",
+            "avg_write_time_ms": r"Average Write Time:\s*([\d.]+)",
+            "max_write_time_ms": r"Maximum Write Time:\s*([\d.]+)",
+        }
+        status: Dict[str, Optional[float]] = {}
+        for key, pattern in fields.items():
+            match = re.search(pattern, report)
+            if match is None:
+                status[key] = None
+            elif "." in match.group(1):
+                status[key] = float(match.group(1))
+            else:
+                status[key] = int(match.group(1))
+        return status
+
     def snapshot(
         self,
         fw_ver: str,
