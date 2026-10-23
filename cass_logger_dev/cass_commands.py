@@ -805,6 +805,7 @@ class CassCommands:
     # struct layout map to the same dtype key.
     VARIANT_DTYPE_MAP = {
         "std":               "std",
+        "std_DEF-dig":       "std",     # same 76-byte layout as std (D/E/F pins are pull-up digital)
         "i2c_1":             "i2c_1",
         "i2c_45686":         "i2c_1",   # same 108-byte layout as i2c_1
         "i2c_45686_9dof":    "i2c_1",   # same 108-byte layout as i2c_1 (legacy 9dof naming - it's now just i2c_45686)
