@@ -30,6 +30,7 @@ Python package for developers to interface with the Cass Logger. This package al
    |--------|-------------|
    | `examples/load_and_plot_ex.py` | Load a pre-downloaded `.bin` file from `examples/data/` and plot potentiometer (fork/shock) data |
    | `examples/download_and_plot_ex.py` | Download data from a connected device, then plot internal IMU (accelerometer) data |
+   | `examples/load_and_plot_320g_ex.py` | Load a block stream file (LSM6DSV320X variants) from `examples/data/` and plot high-g/low-g acceleration, gyro and magnetometer data |
    | `examples/live_view_ex.py` | Firmware bench tool: poll live snapshots at `--rate` Hz and print every channel plus error counts (needs firmware 0.12+) |
 
    **macOS / Linux:**
@@ -66,9 +67,26 @@ cass_utils = CassCommands()
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Parse binary file | `CassCommands.process_data_file(path)` | Parses a `.bin` file into a pandas DataFrame with a `t` (seconds) column. Pass `fw_ver` if using an I2C firmware variant |
+| Parse binary file | `CassCommands.process_data_file(path)` | Parses a `.bin` file into a pandas DataFrame with a `t` (seconds) column. Pass `fw_ver` if using an I2C firmware variant. For block stream files (below) it returns the 500 Hz records and ignores `fw_ver` |
+| Parse block stream file | `CassCommands.process_stream_file(path)` | For the LSM6DSV320X variants (`i2c_320g`, `i2c_320g_2`; firmware 0.13+). Returns a `StreamData`: `records` (the 500 Hz DataFrame) and `imu["C"]` / `imu["E"]` with per-sensor DataFrames at the IMU's own rate (~937 Hz) |
 | Parse FIT file | `CassCommands.process_fit_file(dir, filename)` | Parses a `.fit` file into `(df_session, df_record)` DataFrames |
 | Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID |
+
+#### Block stream files
+
+The LSM6DSV320X variants write a different file format: a stream of tagged blocks, where the 500 Hz record is one block type and each IMU's FIFO readings come in their own blocks with a time for every sample. The spec is `docs/stream-format.md` in cass-logger-fw; the parser is `cass_logger_dev/stream_format.py`.
+
+```python
+data = CassCommands.process_stream_file("LOG_1793206549.bin")
+data.records                 # 500 Hz analog channels + internal SPI IMU
+imu = data.imu["C"]          # LSM6DSV320X on port C
+imu.accel_hg                 # t, tmicros, x, y, z [mg] (±320 g), t_edge
+imu.accel_lg, imu.gyro       # [mg] (±16 g), [dps]; same times as accel_hg
+imu.mag, imu.timestamp       # [µT] (~117/s), IMU tick counter (~29/s)
+imu.events                   # FIFO overruns, failed/late reads, sync loss/resync
+```
+
+All times share the records' zero. `t_edge` is True when a sample's time is its INT1 (data-ready) edge, and False when it's an estimate because pairing was lost; `events` shows where.
 
 ### Device Configuration
 
@@ -76,7 +94,7 @@ cass_utils = CassCommands()
 |-----------|--------|-------------|
 | Set RTC time | `cass_utils.set_RTC_time()` | Syncs the device RTC to the current UTC time |
 | Get RTC time | `cass_utils.get_RTC_time()` | Reads the current RTC time from the device |
-| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"std"`, `"i2c_1"`, `"i2c_2"`) |
+| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"0.13-std"`, `"0.13-i2c_2"`, `"0.13-i2c_320g"`) |
 | Get device ID | `cass_utils.get_device_ID()` | Reads the device identifier stored in EEPROM |
 | Set device ID | `cass_utils.put_device_ID(id)` | Writes a device identifier string to EEPROM |
 | Get RTC install time | `cass_utils.get_rtc_install_timestamp()` | Reads the RTC battery install timestamp from EEPROM |

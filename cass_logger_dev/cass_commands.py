@@ -27,6 +27,13 @@ from .firmware_structs import (
     FIRMWARE_DTYPES,
     COLUMN_ORDERS,
 )
+from .stream_format import (
+    StreamData,
+    is_stream_file,
+    process_stream,
+    read_stream,
+    records_frame,
+)
 from .live import (
     FRAME_SNAPSHOT,
     FrameParser,
@@ -811,6 +818,13 @@ class CassCommands:
         "i2c_45686_9dof":    "i2c_1",   # same 108-byte layout as i2c_1 (legacy 9dof naming - it's now just i2c_45686)
         "i2c_2":             "i2c_2",
         "i2c_45686_2":       "i2c_2",   # same 136-byte layout as i2c_2
+        "i2c_320g":          "i2c_320g",    # block stream format (process_stream_file)
+        "i2c_320g_2":        "i2c_320g_2",  # block stream format (process_stream_file)
+        # Pre-release 0.13 builds named i2c_320x; get_fw_ver() cut that at the 'x'
+        # (its reply terminator), so their metadata.txt says "i2c_320".
+        "i2c_320x":          "i2c_320g",
+        "i2c_320":           "i2c_320g",
+        "i2c_320x_2":        "i2c_320g_2",
     }
 
     @classmethod
@@ -861,6 +875,11 @@ class CassCommands:
         parsing. The tmicros column is zero-referenced and a 't' column
         (seconds, float64) is inserted.
 
+        Block stream files (``i2c_320g`` variants) are detected from their
+        header, which also names the firmware, so ``fw_ver`` is ignored for
+        them. Only the 500 Hz records are returned; use ``process_stream_file``
+        for the FIFO IMU data as well.
+
         Parameters
         ----------
         full_filename : str
@@ -882,6 +901,9 @@ class CassCommands:
             If fw_ver does not map to a known firmware dtype.
         """
         full_filename = Path(full_filename)
+
+        if is_stream_file(full_filename):
+            return records_frame(read_stream(full_filename))[0]
 
         dtype_key = cls.get_dtype_key(fw_ver)
 
@@ -905,6 +927,24 @@ class CassCommands:
         df = df[[col for col in column_order if col in df.columns]]
 
         return df
+
+    @staticmethod
+    def process_stream_file(full_filename: Union[str, Path]) -> StreamData:
+        """Parse a block stream file (``i2c_320g`` variants) into DataFrames.
+
+        Returns a ``StreamData``: ``records`` is the 500 Hz record DataFrame
+        (as from ``process_data_file``), and ``imu`` maps port letter ("C",
+        "E") to that LSM6DSV320X's FIFO data, one DataFrame per sensor
+        (``accel_hg``, ``accel_lg``, ``gyro``, ``mag``, ``timestamp``) plus
+        ``events``. All times share the records' zero. See
+        ``cass_logger_dev.stream_format`` for units and columns.
+
+        Raises
+        ------
+        StreamFormatError
+            If the file isn't a block stream file.
+        """
+        return process_stream(Path(full_filename))
 
     @staticmethod
     def find_and_parse_metadata(
