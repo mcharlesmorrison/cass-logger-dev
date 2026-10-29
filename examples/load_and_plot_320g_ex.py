@@ -15,8 +15,9 @@ Data used
 - ``records`` : the 500 Hz record DataFrame (analog channels and the internal
   SPI IMU), the same as ``process_data_file`` returns.
 - ``imu["C"]`` (and ``imu["E"]`` on ``i2c_320g_2``) : one LSM6DSV320X, as
-  DataFrames ``accel_hg`` / ``accel_lg`` [mg], ``gyro`` [dps], ``mag`` [µT]
-  and ``timestamp``, each with ``t`` (s), ``tmicros`` and ``t_edge``.
+  DataFrames ``accel_hg`` (high-g) / ``accel`` (low-g) [mg], ``gyro`` [dps],
+  ``mag`` [µT] and ``timestamp``, each with ``t`` (s), ``tmicros``, ``t_edge``
+  and ``t_fit``.
 
 All times share the records' zero, so the frames can be plotted together.
 
@@ -55,7 +56,7 @@ def print_summary(data: StreamData):
           f"{' (last block cut off)' if data.truncated else ''}")
     for port, imu in data.imu.items():
         print(f"IMU on port {port}:")
-        for name in ["accel_hg", "accel_lg", "gyro", "mag", "timestamp"]:
+        for name in ["accel_hg", "accel", "gyro", "mag", "timestamp"]:
             frame = getattr(imu, name)
             edge = frame["t_edge"].mean() * 100 if len(frame) else 0.0
             print(f"  {name:10s} {len(frame):7d} samples, {len(frame) / span:6.1f}/s, "
@@ -74,7 +75,7 @@ def plot_imu_data(data: StreamData, port: str = "C"):
     fig, axs = plt.subplots(nrows=3, ncols=1, sharex=True, figsize=(12, 8))
     for ax, axis in zip(axs, ["x", "y", "z"]):
         ax.plot(imu.accel_hg["t"], imu.accel_hg[axis], label="high-g (±320 g)")
-        ax.plot(imu.accel_lg["t"], imu.accel_lg[axis], label="low-g (±16 g)")
+        ax.plot(imu.accel["t"], imu.accel[axis], label="low-g (±16 g)")
         ax.set_ylabel(f"a{axis} [mg]")
         ax.tick_params(axis="x", labelbottom=True)
     axs[0].set_title(f"[Example] LSM6DSV320X port {port}: acceleration")

@@ -30,12 +30,13 @@ from .firmware_structs import (
 from .stream_format import (
     StreamData,
     is_stream_file,
+    legacy_stream_data,
     process_stream,
     read_stream,
     records_frame,
 )
 from .live import (
-    FRAME_SNAPSHOT,
+    SNAPSHOT_FRAMES,
     FrameParser,
     Snapshot,
     decode_frame,
@@ -771,7 +772,7 @@ class CassCommands:
             n = ser_data.in_waiting
             if n:
                 for frame in parser.feed(ser_data.read(n)):
-                    if frame.frame_type == FRAME_SNAPSHOT:
+                    if frame.frame_type in SNAPSHOT_FRAMES:
                         return decode_frame(frame, fw_ver)
             if time.monotonic() > deadline:
                 ser_data.reset_input_buffer()
@@ -810,6 +811,7 @@ class CassCommands:
 
     # Maps firmware variant suffix to dtype key. Variants that share a
     # struct layout map to the same dtype key.
+    # Record layouts before firmware 0.13 (back-to-back datrec files).
     VARIANT_DTYPE_MAP = {
         "std":               "std",
         "std_DEF-dig":       "std",     # same 76-byte layout as std (D/E/F pins are pull-up digital)
@@ -818,17 +820,32 @@ class CassCommands:
         "i2c_45686_9dof":    "i2c_1",   # same 108-byte layout as i2c_1 (legacy 9dof naming - it's now just i2c_45686)
         "i2c_2":             "i2c_2",
         "i2c_45686_2":       "i2c_2",   # same 136-byte layout as i2c_2
-        "i2c_320g":          "i2c_320g",    # block stream format (process_stream_file)
-        "i2c_320g_2":        "i2c_320g_2",  # block stream format (process_stream_file)
-        # Pre-release 0.13 builds named i2c_320x; get_fw_ver() cut that at the 'x'
-        # (its reply terminator), so their metadata.txt says "i2c_320".
-        "i2c_320x":          "i2c_320g",
-        "i2c_320":           "i2c_320g",
-        "i2c_320x_2":        "i2c_320g_2",
     }
 
+    # Record layouts from firmware 0.13, when every variant moved to the block
+    # stream format (process_stream_file). Newest first: the first 0.13 test
+    # builds (stream_1 / stream_2) still had the SPI IMU in the record, so with
+    # the record length known (stream files and live view frames carry it), the
+    # layout of that length is picked.
+    STREAM_LAYOUTS = {
+        "std":          ["analog_18"],
+        "std_DEF-dig":  ["analog_18"],
+        "i2c_1":        ["analog_15_i2c"],
+        "i2c_2":        ["analog_12_i2c2"],
+        "i2c_45686":    ["analog_15", "stream_1"],
+        "i2c_45686_2":  ["analog_12", "stream_2"],
+        "i2c_320g":     ["analog_15", "stream_1"],
+        "i2c_320g_2":   ["analog_12", "stream_2"],
+        # Pre-release 0.13 builds named i2c_320x; get_fw_ver() cut that at the 'x'
+        # (its reply terminator), so their metadata.txt says "i2c_320".
+        "i2c_320x":     ["analog_15", "stream_1"],
+        "i2c_320":      ["analog_15", "stream_1"],
+        "i2c_320x_2":   ["analog_12", "stream_2"],
+    }
+    STREAM_FROM_VERSION = (0, 13)
+
     @classmethod
-    def get_dtype_key(cls, fw_ver: str) -> str:
+    def get_dtype_key(cls, fw_ver: str, record_len: Optional[int] = None) -> str:
         """Map a full firmware version string to its dtype/struct-layout key.
 
         Parameters
@@ -836,6 +853,9 @@ class CassCommands:
         fw_ver : str
             Full firmware version string, e.g. "0.10-i2c_2" or "0.09-std".
             Format is "<version>-<variant>" or just "<version>".
+        record_len : int, optional
+            The record's size in bytes, if known (stream file header, live view
+            frame). From 0.13 it picks between layouts a variant has had.
 
         Returns
         -------
@@ -862,6 +882,15 @@ class CassCommands:
         if variant == "i2c_1" and legacy_version:
             return "i2c_1_legacy"
 
+        layouts = cls.STREAM_LAYOUTS.get(variant)
+        if layouts is not None and version_tuple >= cls.STREAM_FROM_VERSION:
+            if record_len is None:
+                return layouts[0]
+            for key in layouts:
+                if FIRMWARE_DTYPES[key]().itemsize == record_len:
+                    return key
+            raise ValueError(f"No {record_len}-byte record layout for '{fw_ver}'")
+
         dtype_key = cls.VARIANT_DTYPE_MAP.get(variant)
         if dtype_key is None:
             raise ValueError(f"Unsupported firmware variant '{variant}' (from fw_ver='{fw_ver}')")
@@ -875,10 +904,10 @@ class CassCommands:
         parsing. The tmicros column is zero-referenced and a 't' column
         (seconds, float64) is inserted.
 
-        Block stream files (``i2c_320g`` variants) are detected from their
-        header, which also names the firmware, so ``fw_ver`` is ignored for
-        them. Only the 500 Hz records are returned; use ``process_stream_file``
-        for the FIFO IMU data as well.
+        Block stream files (``i2c_320g`` variants, and ``i2c_45686`` from 0.13)
+        are detected from their header, which also names the firmware, so
+        ``fw_ver`` is ignored for them. Only the 500 Hz records are returned;
+        use ``process_stream_file`` for the FIFO IMU data as well.
 
         Parameters
         ----------
@@ -928,23 +957,38 @@ class CassCommands:
 
         return df
 
-    @staticmethod
-    def process_stream_file(full_filename: Union[str, Path]) -> StreamData:
-        """Parse a block stream file (``i2c_320g`` variants) into DataFrames.
+    @classmethod
+    def process_stream_file(cls, full_filename: Union[str, Path], fw_ver: Optional[str] = None) -> StreamData:
+        """Parse a block stream file (``i2c_320g`` variants, and ``i2c_45686``
+        from 0.13) into DataFrames.
 
         Returns a ``StreamData``: ``records`` is the 500 Hz record DataFrame
         (as from ``process_data_file``), and ``imu`` maps port letter ("C",
-        "E") to that LSM6DSV320X's FIFO data, one DataFrame per sensor
-        (``accel_hg``, ``accel_lg``, ``gyro``, ``mag``, ``timestamp``) plus
-        ``events``. All times share the records' zero. See
-        ``cass_logger_dev.stream_format`` for units and columns.
+        "E") to that IMU's FIFO data, one DataFrame per sensor (``accel``,
+        ``accel_hg``, ``gyro``, ``mag``, ``timestamp``) plus ``events`` and
+        ``reads``. All times share the records' zero. See
+        ``cass_logger_dev.stream_format`` for units and columns. The internal
+        SPI IMU is ``imu["S"]`` (from firmware 0.13 it's a FIFO source too).
+
+        This is the default way to read any logger file. Files from before
+        0.13 (back-to-back records) need ``fw_ver``; their IMUs, which were
+        polled into the records, are presented the same way, one sample per
+        record (see ``stream_format.legacy_stream_data``).
 
         Raises
         ------
+        ValueError
+            If a pre-0.13 file is given without ``fw_ver``, or ``fw_ver`` is
+            not a known variant.
         StreamFormatError
-            If the file isn't a block stream file.
+            If a stream file's header is unusable.
         """
-        return process_stream(Path(full_filename))
+        full_filename = Path(full_filename)
+        if is_stream_file(full_filename):
+            return process_stream(full_filename)
+        if fw_ver is None:
+            raise ValueError(f"{full_filename.name} is a pre-0.13 file: pass its fw_ver (e.g. from metadata.txt)")
+        return legacy_stream_data(cls.process_data_file(full_filename, fw_ver), fw_ver)
 
     @staticmethod
     def find_and_parse_metadata(

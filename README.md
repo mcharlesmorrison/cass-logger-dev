@@ -67,26 +67,28 @@ cass_utils = CassCommands()
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Parse binary file | `CassCommands.process_data_file(path)` | Parses a `.bin` file into a pandas DataFrame with a `t` (seconds) column. Pass `fw_ver` if using an I2C firmware variant. For block stream files (below) it returns the 500 Hz records and ignores `fw_ver` |
-| Parse block stream file | `CassCommands.process_stream_file(path)` | For the LSM6DSV320X variants (`i2c_320g`, `i2c_320g_2`; firmware 0.13+). Returns a `StreamData`: `records` (the 500 Hz DataFrame) and `imu["C"]` / `imu["E"]` with per-sensor DataFrames at the IMU's own rate (~937 Hz) |
+| Parse a logger file (default) | `CassCommands.process_stream_file(path, fw_ver=None)` | Any `.bin` file. Returns a `StreamData`: `records` (the 500 Hz DataFrame: analog channels, plus the polled I2C ICM-20948 on `i2c_1` / `i2c_2`) and `imu` with per-sensor DataFrames per IMU: `"S"` the internal ICM-20948, `"C"` / `"E"` the port IMUs. Firmware 0.13+ files describe themselves; older files need `fw_ver` (e.g. from `metadata.txt`), and their IMUs come from the records, one sample each |
+| Parse records only | `CassCommands.process_data_file(path)` | The 500 Hz records as a DataFrame with a `t` (seconds) column. Pass `fw_ver` for pre-0.13 files from I2C variants. From 0.13 the IMUs aren't in the records, so this has the analog channels only |
 | Parse FIT file | `CassCommands.process_fit_file(dir, filename)` | Parses a `.fit` file into `(df_session, df_record)` DataFrames |
 | Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID |
 
 #### Block stream files
 
-The LSM6DSV320X variants write a different file format: a stream of tagged blocks, where the 500 Hz record is one block type and each IMU's FIFO readings come in their own blocks with a time for every sample. The spec is `docs/stream-format.md` in cass-logger-fw; the parser is `cass_logger_dev/stream_format.py`.
+From firmware 0.13 every variant writes a stream of tagged blocks: the 500 Hz record is one block type, and each IMU's FIFO readings come in their own blocks with a time for every sample, at the IMU's own rate (internal ICM-20948 ~1.13 kHz, ICM-45686 ~819 Hz, LSM6DSV320X ~937 Hz). The spec is `docs/stream-format.md` in cass-logger-fw; the parser is `cass_logger_dev/stream_format.py`.
 
 ```python
-data = CassCommands.process_stream_file("LOG_1793206549.bin")
-data.records                 # 500 Hz analog channels + internal SPI IMU
-imu = data.imu["C"]          # LSM6DSV320X on port C
-imu.accel_hg                 # t, tmicros, x, y, z [mg] (±320 g), t_edge
-imu.accel_lg, imu.gyro       # [mg] (±16 g), [dps]; same times as accel_hg
-imu.mag, imu.timestamp       # [µT] (~117/s), IMU tick counter (~29/s)
-imu.events                   # FIFO overruns, failed/late reads, sync loss/resync
+data = CassCommands.process_stream_file("LOG_1793290048.bin")
+data.records                 # 500 Hz analog channels
+data.imu["S"]                # the internal SPI ICM-20948
+imu = data.imu["C"]          # the IMU on port C (imu.device names it)
+imu.accel, imu.gyro          # t, tmicros, x, y, z [mg] / [dps], t_edge, t_fit
+imu.accel_hg                 # LSM6DSV320X high-g accelerometer [mg] (±320 g); empty for the ICM-45686
+imu.mag, imu.timestamp       # [µT], raw IMU timestamp counter
+imu.events                   # FIFO overruns, failed/late reads, timing lost/re-established
+imu.reads                    # each FIFO read's time and entry count (format 2+)
 ```
 
-All times share the records' zero. `t_edge` is True when a sample's time is its INT1 (data-ready) edge, and False when it's an estimate because pairing was lost; `events` shows where.
+All times share the records' zero. How good a sample's time is: `t_edge` is True when it's the sample's INT1 (data-ready) edge (LSM6DSV320X); `t_fit` when it comes from a converged fit of the IMU's own sample clock (ICM-20948, ICM-45686, which have no INT pin wired; ~1 s after recording starts). With neither, the time is an estimate; `events` shows where timing was lost.
 
 ### Device Configuration
 
@@ -105,7 +107,7 @@ All times share the records' zero. `t_edge` is True when a sample's time is its 
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError` |
+| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError`. From 0.13 the IMU readings arrive alongside the record and are decoded into the same column names (`gx`…`Tz`, `gx_i2c_c`…); `live_columns(fw_ver)` lists them |
 
 Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-view-plan.md` for the spec.
 
