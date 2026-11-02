@@ -830,8 +830,6 @@ class CassCommands:
     STREAM_LAYOUTS = {
         "std":          ["analog_18"],
         "std_DEF-dig":  ["analog_18"],
-        "i2c_1":        ["analog_15_i2c"],
-        "i2c_2":        ["analog_12_i2c2"],
         "i2c_45686":    ["analog_15", "stream_1"],
         "i2c_45686_2":  ["analog_12", "stream_2"],
         "i2c_320g":     ["analog_15", "stream_1"],
@@ -882,8 +880,10 @@ class CassCommands:
         if variant == "i2c_1" and legacy_version:
             return "i2c_1_legacy"
 
-        layouts = cls.STREAM_LAYOUTS.get(variant)
-        if layouts is not None and version_tuple >= cls.STREAM_FROM_VERSION:
+        if version_tuple >= cls.STREAM_FROM_VERSION:
+            layouts = cls.STREAM_LAYOUTS.get(variant)
+            if layouts is None:
+                raise ValueError(f"No firmware {version} build of variant '{variant}' (from fw_ver='{fw_ver}')")
             if record_len is None:
                 return layouts[0]
             for key in layouts:
@@ -904,10 +904,10 @@ class CassCommands:
         parsing. The tmicros column is zero-referenced and a 't' column
         (seconds, float64) is inserted.
 
-        Block stream files (``i2c_320g`` variants, and ``i2c_45686`` from 0.13)
-        are detected from their header, which also names the firmware, so
-        ``fw_ver`` is ignored for them. Only the 500 Hz records are returned;
-        use ``process_stream_file`` for the FIFO IMU data as well.
+        Block stream files (every variant from 0.13) are detected from their
+        header, which also names the firmware, so ``fw_ver`` is ignored for
+        them. Only the 500 Hz analog records are returned (from 0.13 every IMU
+        is in FIFO blocks); use ``process_stream_file`` for the IMU data.
 
         Parameters
         ----------

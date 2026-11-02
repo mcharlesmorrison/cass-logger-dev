@@ -41,21 +41,34 @@ def block(btype: int, source: int, payload: bytes) -> bytes:
     return bytes([SYNC, btype, source]) + struct.pack("<H", len(payload)) + payload
 
 
-def file_header(fw: str = FW, n_sources: int = 1, version: int = 2) -> bytes:
+def file_header(fw: str = FW, n_sources: int = 1, version: int = 3) -> bytes:
     rec_len = FIRMWARE_DTYPES[CassCommands.get_dtype_key(fw)]().itemsize
     payload = struct.pack("<4sH16sHHB", b"CASS", version, fw.encode(), 500, rec_len, n_sources)
     return block(BLOCK_FILE_HEADER, 0, payload)
 
 
-def source_info(source: int = 1, port: bytes = b"C") -> bytes:
-    payload = struct.pack("<BcBB5f", DEVICE_LSM6DSV320X, port, 0x6B, 1, 960.0, 10.417, 0.488, 70.0, 1.0)
+def imu_source_info(source: int, device: int, port: bytes, addr: int, sensors: int, pairs: list,
+                    kind: int = 1) -> bytes:
+    """Format 3+ SOURCE_INFO: common header, IMU part, one (rate, scale) pair per set bit."""
+    payload = struct.pack("<BBcBB", kind, device, port, addr, sensors)
+    payload += b"".join(struct.pack("<ff", r, s) for r, s in pairs)
     return block(BLOCK_SOURCE_INFO, source, payload)
+
+
+def source_info(source: int = 1, port: bytes = b"C", version: int = 3) -> bytes:
+    """An LSM6DSV320X + QMC6309 source."""
+    if version < 3:
+        payload = struct.pack("<BcBB5f", DEVICE_LSM6DSV320X, port, 0x6B, 1, 960.0, 10.417, 0.488, 70.0, 1.0)
+        return block(BLOCK_SOURCE_INFO, source, payload)
+    # accel, gyro, mag, high-g
+    return imu_source_info(source, DEVICE_LSM6DSV320X, port, 0x6B, 0x0F,
+                           [(960.0, 0.488), (960.0, 70.0), (120.0, 1.0), (960.0, 10.417)])
 
 
 def icm_source_info(source: int = 1, port: bytes = b"C") -> bytes:
-    payload = struct.pack("<BcBB5f", DEVICE_ICM45686_MAG, port, 0x69, 1, 800.0, 0.0,
-                          32000 / 32768, 2000000 / 32768, 1.0)
-    return block(BLOCK_SOURCE_INFO, source, payload)
+    """An ICM-45686 + QMC6309 source: accel, gyro, mag."""
+    return imu_source_info(source, DEVICE_ICM45686_MAG, port, 0x69, 0x07,
+                           [(800.0, 32000 / 32768), (800.0, 2000000 / 32768), (250.0, 1.0)])
 
 
 def record(tmicros: int, fw: str = FW, a0: int = 0) -> bytes:
@@ -71,27 +84,27 @@ def entry(t_us: int, sensor: int, xyz=(0, 0, 0), flags: int = FIFO_ENTRY_T_EDGE,
     return struct.pack("<IBB", t_us & 0xFFFFFFFF, (sensor << 3) | 0b010, flags) + data
 
 
-def fifo(entries: list, source: int = 1, flags: int = 0, read_us: int = 0, version: int = 2) -> bytes:
+def fifo(entries: list, source: int = 1, flags: int = 0, read_us: int = 0, version: int = 3) -> bytes:
     header = bytes([flags, len(entries)]) + (struct.pack("<I", read_us & 0xFFFFFFFF) if version >= 2 else b"")
     return block(BLOCK_FIFO, source, header + b"".join(entries))
 
 
-def tick(t: int, source: int = 1, version: int = 2) -> bytes:
+def tick(t: int, source: int = 1, version: int = 3) -> bytes:
     """One collector tick: gyro, low-g, high-g of one ODR instant, then the record."""
     return fifo([entry(t - 500, TAG_GYRO, (1, 2, 3)),
                  entry(t - 500, TAG_ACCEL, (4, 5, 6)),
                  entry(t - 500, TAG_ACCEL_HG, (7, 8, 9))], source, read_us=t - 200, version=version) + record(t)
 
 
-def stream(*parts: bytes, n_sources: int = 1, version: int = 2) -> bytes:
-    return file_header(n_sources=n_sources, version=version) + source_info() + b"".join(parts)
+def stream(*parts: bytes, n_sources: int = 1, version: int = 3) -> bytes:
+    return file_header(n_sources=n_sources, version=version) + source_info(version=version) + b"".join(parts)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 # Record sizes must match the firmware's static_asserts (deviceConfig.h).
 @pytest.mark.parametrize("fw_ver,size", [
-    ("0.13-std", 40), ("0.13-i2c_1", 72), ("0.13-i2c_2", 100),
+    ("0.13-std", 40),
     ("0.13-i2c_320g", 36), ("0.13-i2c_320g_2", 28), ("0.13-i2c_45686", 36), ("0.13-i2c_45686_2", 28),
     ("0.12-std", 76), ("0.12-i2c_45686", 108), ("0.12-i2c_45686_2", 136),
 ])
@@ -101,7 +114,6 @@ def test_record_sizes_match_firmware(fw_ver, size):
 
 @pytest.mark.parametrize("fw_ver,key", [
     ("0.12-std", "std"), ("0.13-std", "analog_18"), ("0.14-std", "analog_18"),
-    ("0.13-i2c_1", "analog_15_i2c"), ("0.13-i2c_2", "analog_12_i2c2"),
     ("0.13-i2c_320g", "analog_15"), ("0.13-i2c_320g_2", "analog_12"),
     # pre-release names: i2c_320x, and "i2c_320" as cut short by get_fw_ver()
     ("0.13-i2c_320x", "analog_15"), ("0.13-i2c_320", "analog_15"), ("0.13-i2c_320x_2", "analog_12"),
@@ -125,6 +137,14 @@ def test_dtype_key_by_record_len(fw_ver, record_len, key):
 def test_dtype_key_unknown_record_len():
     with pytest.raises(ValueError):
         CassCommands.get_dtype_key("0.13-i2c_45686", 50)
+
+
+@pytest.mark.parametrize("fw_ver", ["0.13-i2c_1", "0.13-i2c_2"])
+def test_dtype_key_dropped_variants(fw_ver):
+    # i2c_1 / i2c_2 have no 0.13 build; their older files still parse.
+    with pytest.raises(ValueError, match="No firmware"):
+        CassCommands.get_dtype_key(fw_ver)
+    assert CassCommands.get_dtype_key(fw_ver.replace("0.13", "0.12")) in ("i2c_1", "i2c_2")
 
 
 def test_parse_and_decode():
@@ -268,11 +288,13 @@ LEGACY_LOG = Path(__file__).parent.parent / "examples" / "data" / "icm45686-test
 
 def test_icm20948_source():
     # The internal SPI ICM-20948: source 3, port 'S', ±16 g / ±2000 dps / AK09916.
-    payload = struct.pack("<BcBB5f", 1, b"S", 0, 1, 1100.0, 0.0, 1000 / 2048, 1000 / 16.4, 1.5)
+    info = imu_source_info(3, 1, b"S", 0, 0x07, [(1125.0, 1000 / 2048), (1100.0, 1000 / 16.4), (100.0, 1.5)])
     words = [entry(40000, TAG_ACCEL, (2048, 0, 0), flags=FIFO_ENTRY_T_FIT),
              entry(40000, TAG_GYRO, (164, 0, 0), flags=FIFO_ENTRY_T_FIT),
              entry(40000, TAG_MAG, (100, 0, 0), flags=0)]
-    data = file_header() + block(BLOCK_SOURCE_INFO, 3, payload) + fifo(words, source=3, read_us=40500) + record(40000)
+    data = file_header() + info + fifo(words, source=3, read_us=40500) + record(40000)
+    s = read_stream(data).sources[3]
+    assert (s.accel_hz, s.gyro_hz, s.mag_hz, s.hg_hz) == (1125.0, 1100.0, 100.0, 0.0)
     imu = process_stream(data).imu["S"]
     assert imu.device == "ICM-20948"
     assert imu.accel["x"].iloc[0] == pytest.approx(1000.0)  # 1 g
@@ -309,3 +331,51 @@ def test_real_log_two_fifo_imus():
         assert locked["t_fit"].all()
         assert locked["tmicros"].diff().dropna().std() < 2.0  # µs: regular sample times
         assert imu.events[["overrun", "read_failed", "late", "sync_lost"]].to_numpy().sum() == 0
+
+
+# ── SOURCE_INFO, format 3 ────────────────────────────────────────────────────
+
+def test_source_info_v3_all_sensors():
+    s = read_stream(stream(tick(40000))).sources[1]
+    assert s.is_imu and s.device == "LSM6DSV320X + QMC6309" and s.port == "C" and s.i2c_addr == 0x6B
+    assert s.sensors == 0x0F and s.has_mag
+    assert (s.accel_hz, s.gyro_hz, s.mag_hz, s.hg_hz) == (960.0, 960.0, 120.0, 960.0)
+    assert s.hg_mg_per_lsb == pytest.approx(10.417)
+
+
+def test_source_info_v2_still_parses():
+    s = read_stream(stream(tick(40000, version=2), version=2)).sources[1]
+    assert s.sensors == 0x0F and s.accel_hz == 960.0 and s.mag_hz == 0.0  # v2 had no per-sensor rates
+    assert s.hg_mg_per_lsb == pytest.approx(10.417)
+
+
+def test_accel_only_imu():
+    info = imu_source_info(1, 2, b"C", 0x69, 0x01, [(800.0, 0.5)])
+    data = file_header() + info + fifo([entry(40000, TAG_ACCEL, (2000, 0, 0))]) + record(40000)
+    s = read_stream(data).sources[1]
+    assert s.sensors == 0x01 and not s.has_mag and s.gyro_mdps_per_lsb == 0.0
+    imu = process_stream(data).imu["C"]
+    assert imu.accel["x"].iloc[0] == pytest.approx(1000.0) and imu.gyro.empty
+
+
+def test_unknown_sensor_bit_is_skipped():
+    # A future sensor at bit 4: its pair sits after the four known ones and is skipped.
+    info = imu_source_info(1, 2, b"C", 0x69, 0x13, [(800.0, 0.5), (800.0, 61.0), (50.0, 9.9)])
+    s = read_stream(file_header() + info + record(40000)).sources[1]
+    assert s.sensors == 0x13 and (s.accel_hz, s.gyro_hz) == (800.0, 800.0)
+    assert s.accel_mg_per_lsb == pytest.approx(0.5) and s.gyro_mdps_per_lsb == pytest.approx(61.0)
+
+
+def test_unknown_source_kind_is_listed_not_decoded():
+    # e.g. a future GPS: kind 2, with a layout this parser doesn't know.
+    gps = block(BLOCK_SOURCE_INFO, 4, struct.pack("<BBc", 2, 7, b"U") + b"\x00" * 6)
+    data = file_header(n_sources=2) + source_info() + gps + tick(40000)
+    s = read_stream(data)
+    assert s.sources[4].source_kind == 2 and not s.sources[4].is_imu and s.sources[4].port == "U"
+    assert set(process_stream(data).imu) == {"C"}
+
+
+def test_source_info_length_must_match_sensors():
+    # Bitmask says 3 sensors but only 2 pairs follow: the block is rejected.
+    bad = imu_source_info(1, 2, b"C", 0x69, 0x07, [(800.0, 0.5), (800.0, 61.0)])
+    assert 1 not in read_stream(file_header() + bad + record(40000)).sources

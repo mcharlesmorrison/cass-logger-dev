@@ -298,8 +298,8 @@ def dtype_stream_2():
 
 # ── Records from firmware 0.13: every variant writes the block stream format ──
 # The internal SPI ICM-20948 (and any ICM-45686 / LSM6DSV320X) is in FIFO
-# blocks, so the records hold only the analog channels, plus the deprecated
-# polled I2C ICM-20948 on i2c_1 / i2c_2.
+# blocks, so the records hold only the analog channels. (i2c_1 / i2c_2, with a
+# polled I2C ICM-20948 in the record, were dropped in 0.13.)
 
 def dtype_analog_18():
     """Return the NumPy dtype for the std record from firmware 0.13: 18 analog channels."""
@@ -379,88 +379,10 @@ def dtype_analog_12():
     )
 
 
-def dtype_analog_15_i2c():
-    """Return the NumPy dtype for the i2c_1 record from firmware 0.13: 15 analog
-    channels and the polled I2C ICM-20948 on Port C."""
-    return np.dtype(
-        [
-            ("tmicros", "i4"),
-            ("d0", "i2"),
-            ("d1", "i2"),
-            ("d2", "i2"),
-            ("e0", "i2"),
-            ("e1", "i2"),
-            ("e2", "i2"),
-            ("f0", "i2"),
-            ("f1", "i2"),
-            ("f2", "i2"),
-            ("a0", "i2"),
-            ("a1", "i2"),
-            ("a2", "i2"),
-            ("b0", "i2"),
-            ("b1", "i2"),
-            ("b2", "i2"),
-            # 2-byte alignment pad before the floats (same as i2c_1).
-            ("_pad", "u2"),
-            ("gx_i2c", "f4"),
-            ("gy_i2c", "f4"),
-            ("gz_i2c", "f4"),
-            ("wx_i2c", "f4"),
-            ("wy_i2c", "f4"),
-            ("wz_i2c", "f4"),
-            ("Tx_i2c", "f4"),
-            ("Ty_i2c", "f4"),
-            ("Tz_i2c", "f4"),
-        ]
-    )
-
-
-def dtype_analog_12_i2c2():
-    """Return the NumPy dtype for the i2c_2 record from firmware 0.13: 12 analog
-    channels and the polled I2C ICM-20948s on Ports C and E."""
-    return np.dtype(
-        [
-            ("tmicros", "i4"),
-            ("d0", "i2"),
-            ("d1", "i2"),
-            ("d2", "i2"),
-            ("f0", "i2"),
-            ("f1", "i2"),
-            ("f2", "i2"),
-            ("a0", "i2"),
-            ("a1", "i2"),
-            ("a2", "i2"),
-            ("b0", "i2"),
-            ("b1", "i2"),
-            ("b2", "i2"),
-            ("gx_i2c_c", "f4"),
-            ("gy_i2c_c", "f4"),
-            ("gz_i2c_c", "f4"),
-            ("wx_i2c_c", "f4"),
-            ("wy_i2c_c", "f4"),
-            ("wz_i2c_c", "f4"),
-            ("Tx_i2c_c", "f4"),
-            ("Ty_i2c_c", "f4"),
-            ("Tz_i2c_c", "f4"),
-            ("gx_i2c_e", "f4"),
-            ("gy_i2c_e", "f4"),
-            ("gz_i2c_e", "f4"),
-            ("wx_i2c_e", "f4"),
-            ("wy_i2c_e", "f4"),
-            ("wz_i2c_e", "f4"),
-            ("Tx_i2c_e", "f4"),
-            ("Ty_i2c_e", "f4"),
-            ("Tz_i2c_e", "f4"),
-        ]
-    )
-
-
 FIRMWARE_DTYPES = {
     "analog_18": dtype_analog_18,
     "analog_15": dtype_analog_15,
     "analog_12": dtype_analog_12,
-    "analog_15_i2c": dtype_analog_15_i2c,
-    "analog_12_i2c2": dtype_analog_12_i2c2,
     "stream_2": dtype_stream_2,
     "stream_1": dtype_stream_1,
     "i2c_2": dtype_i2c_2,
@@ -527,68 +449,6 @@ COLUMN_ORDERS = {
         "f0",
         "f1",
         "f2",
-    ],
-    "analog_15_i2c": [
-        "tmicros",
-        "t",
-        "a0",
-        "a1",
-        "a2",
-        "b0",
-        "b1",
-        "b2",
-        "d0",
-        "d1",
-        "d2",
-        "e0",
-        "e1",
-        "e2",
-        "f0",
-        "f1",
-        "f2",
-        "gx_i2c",
-        "gy_i2c",
-        "gz_i2c",
-        "wx_i2c",
-        "wy_i2c",
-        "wz_i2c",
-        "Tx_i2c",
-        "Ty_i2c",
-        "Tz_i2c",
-    ],
-    "analog_12_i2c2": [
-        "tmicros",
-        "t",
-        "a0",
-        "a1",
-        "a2",
-        "b0",
-        "b1",
-        "b2",
-        "d0",
-        "d1",
-        "d2",
-        "f0",
-        "f1",
-        "f2",
-        "gx_i2c_c",
-        "gy_i2c_c",
-        "gz_i2c_c",
-        "wx_i2c_c",
-        "wy_i2c_c",
-        "wz_i2c_c",
-        "Tx_i2c_c",
-        "Ty_i2c_c",
-        "Tz_i2c_c",
-        "gx_i2c_e",
-        "gy_i2c_e",
-        "gz_i2c_e",
-        "wx_i2c_e",
-        "wy_i2c_e",
-        "wz_i2c_e",
-        "Tx_i2c_e",
-        "Ty_i2c_e",
-        "Tz_i2c_e",
     ],
     "stream_2": [
         "tmicros",

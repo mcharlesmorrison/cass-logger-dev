@@ -67,7 +67,7 @@ cass_utils = CassCommands()
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Parse a logger file (default) | `CassCommands.process_stream_file(path, fw_ver=None)` | Any `.bin` file. Returns a `StreamData`: `records` (the 500 Hz DataFrame: analog channels, plus the polled I2C ICM-20948 on `i2c_1` / `i2c_2`) and `imu` with per-sensor DataFrames per IMU: `"S"` the internal ICM-20948, `"C"` / `"E"` the port IMUs. Firmware 0.13+ files describe themselves; older files need `fw_ver` (e.g. from `metadata.txt`), and their IMUs come from the records, one sample each |
+| Parse a logger file (default) | `CassCommands.process_stream_file(path, fw_ver=None)` | Any `.bin` file. Returns a `StreamData`: `records` (the 500 Hz DataFrame of analog channels) and `imu` with per-sensor DataFrames per IMU: `"S"` the internal ICM-20948, `"C"` / `"E"` the port IMUs. Firmware 0.13+ files describe themselves; older files need `fw_ver` (e.g. from `metadata.txt`), and their IMUs come from the records, one sample each |
 | Parse records only | `CassCommands.process_data_file(path)` | The 500 Hz records as a DataFrame with a `t` (seconds) column. Pass `fw_ver` for pre-0.13 files from I2C variants. From 0.13 the IMUs aren't in the records, so this has the analog channels only |
 | Parse FIT file | `CassCommands.process_fit_file(dir, filename)` | Parses a `.fit` file into `(df_session, df_record)` DataFrames |
 | Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID |
@@ -96,7 +96,7 @@ All times share the records' zero. How good a sample's time is: `t_edge` is True
 |-----------|--------|-------------|
 | Set RTC time | `cass_utils.set_RTC_time()` | Syncs the device RTC to the current UTC time |
 | Get RTC time | `cass_utils.get_RTC_time()` | Reads the current RTC time from the device |
-| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"0.13-std"`, `"0.13-i2c_2"`, `"0.13-i2c_320g"`) |
+| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"0.13-std"`, `"0.13-i2c_45686"`, `"0.13-i2c_320g"`) |
 | Get device ID | `cass_utils.get_device_ID()` | Reads the device identifier stored in EEPROM |
 | Set device ID | `cass_utils.put_device_ID(id)` | Writes a device identifier string to EEPROM |
 | Get RTC install time | `cass_utils.get_rtc_install_timestamp()` | Reads the RTC battery install timestamp from EEPROM |

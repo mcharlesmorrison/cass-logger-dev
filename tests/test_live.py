@@ -276,7 +276,6 @@ def test_snapshot_imu_frame_high_g():
 @pytest.mark.parametrize("fw_ver,imu_cols", [
     ("0.12-std", ["gx", "Tz"]),                       # in the record
     ("0.13-std", ["gx", "Tz"]),                       # internal FIFO IMU
-    ("0.13-i2c_2", ["gx", "gx_i2c_c", "gx_i2c_e"]),   # internal FIFO + polled I2C in the record
     ("0.13-i2c_45686_2", ["gx", "Tz_i2c_c", "Tz_i2c_e"]),
     ("0.13-i2c_320g", ["gx", "hgx_i2c_c"]),
 ])

@@ -62,12 +62,10 @@ LIVE_IMU_HG = 0x08
 IMU_SUFFIX = {"S": "", "C": "_i2c_c", "E": "_i2c_e"}
 
 # FIFO IMUs per variant from firmware 0.13, as (port, has high-g): every
-# variant has the internal one; the deprecated I2C ICM-20948 is in the record.
+# variant has the internal one.
 LIVE_FIFO_IMUS = {
     "std":          [("S", False)],
     "std_DEF-dig":  [("S", False)],
-    "i2c_1":        [("S", False)],
-    "i2c_2":        [("S", False)],
     "i2c_45686":    [("S", False), ("C", False)],
     "i2c_45686_2":  [("S", False), ("C", False), ("E", False)],
     "i2c_320g":     [("S", False), ("C", True)],

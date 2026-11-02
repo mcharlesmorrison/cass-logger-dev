@@ -18,7 +18,9 @@ then interleaves RECORD blocks (one datrec per 500 Hz tick) and FIFO blocks
 
 Format version 2 added each FIFO block's read time and the T_FIT entry flag
 (sample times from a fit of the IMU's own clock, for IMUs with no data-ready
-pin). Version 1 files still parse.
+pin). Version 3 made SOURCE_INFO start with a source kind, and gave IMUs a
+sensor bitmask with a rate and scale per fitted sensor. Versions 1 and 2
+still parse.
 
 This module does no serial I/O, so it can be tested without hardware. Full
 spec: ``docs/stream-format.md`` in cass-logger-fw.
@@ -38,7 +40,7 @@ from .firmware_structs import COLUMN_ORDERS, FIRMWARE_DTYPES
 
 SYNC = 0xA5
 MAGIC = b"CASS"
-FORMAT_VERSIONS = (1, 2)
+FORMAT_VERSIONS = (1, 2, 3)
 
 BLOCK_FILE_HEADER = 0x01
 BLOCK_SOURCE_INFO = 0x02
@@ -50,7 +52,7 @@ HEADER_LEN = 5
 FILE_HEADER = struct.Struct("<4sH16sHHB")  # magic, format_version, fw_version, record_rate_hz, record_len, n_sources
 
 # FIFO block header: flags, entry count, and (v2) the read time.
-FIFO_HEADER_LEN = {1: 2, 2: 6}
+FIFO_HEADER_LEN = {1: 2, 2: 6, 3: 6}
 
 # FIFO block flags: events since the source's previous block.
 FIFO_BLOCK_FLAGS = {
@@ -90,9 +92,24 @@ TAG_MAG = 0x0E
 TAG_MAG_NACK = 0x19
 TAG_ACCEL_HG = 0x1D
 
-# SOURCE_INFO for an IMU: device_type, port, i2c_addr, has_mag, odr_hz, then
-# hg / accel / gyro / mag sensitivities (0 for a sensor the IMU doesn't have).
-IMU_SOURCE_INFO = struct.Struct("<BcBB5f")
+# SOURCE_INFO, format 3+: a common header (source_kind, device_type, port),
+# then a kind-specific part. IMU: i2c_addr, sensors bitmask, then one
+# (rate_hz, scale) pair per set bit, in bit order.
+SOURCE_HEADER = struct.Struct("<BBc")
+SOURCE_KIND_IMU = 1
+IMU_INFO = struct.Struct("<BB")
+IMU_SENSOR_PAIR = struct.Struct("<ff")
+
+# IMU sensor bits (SOURCE_INFO `sensors`, live view `valid`), in pair order.
+IMU_ACCEL = 0x01
+IMU_GYRO = 0x02
+IMU_MAG = 0x04
+IMU_ACCEL_HG = 0x08
+IMU_SENSOR_NAMES = {IMU_ACCEL: "accel", IMU_GYRO: "gyro", IMU_MAG: "mag", IMU_ACCEL_HG: "accel_hg"}
+
+# SOURCE_INFO, formats 1 and 2 (IMUs only): device_type, port, i2c_addr,
+# has_mag, odr_hz, then hg / accel / gyro / mag sensitivities.
+IMU_SOURCE_INFO_V2 = struct.Struct("<BcBB5f")
 
 
 class StreamFormatError(ValueError):
@@ -101,22 +118,84 @@ class StreamFormatError(ValueError):
 
 @dataclass
 class SourceInfo:
-    """One FIFO source, from its SOURCE_INFO block."""
+    """One source, from its SOURCE_INFO block.
+
+    ``source_kind`` is ``SOURCE_KIND_IMU`` for every source so far; the IMU
+    fields are only meaningful for IMUs. ``sensors`` is the IMU's sensor
+    bitmask (``IMU_*``); a sensor not in it has rate and scale 0.
+    """
 
     source_id: int
+    source_kind: int
     device_type: int
     port: str
-    i2c_addr: int
-    has_mag: bool
-    odr_hz: float
-    hg_mg_per_lsb: float     # 0 if the IMU has no high-g accelerometer
-    accel_mg_per_lsb: float
-    gyro_mdps_per_lsb: float
-    mag_mG_per_lsb: float
+    i2c_addr: int = 0
+    sensors: int = 0
+    accel_hz: float = 0.0
+    gyro_hz: float = 0.0
+    mag_hz: float = 0.0
+    hg_hz: float = 0.0
+    accel_mg_per_lsb: float = 0.0
+    gyro_mdps_per_lsb: float = 0.0
+    mag_mG_per_lsb: float = 0.0
+    hg_mg_per_lsb: float = 0.0
 
     @property
     def device(self) -> str:
         return DEVICE_NAMES.get(self.device_type, f"device {self.device_type}")
+
+    @property
+    def is_imu(self) -> bool:
+        return self.source_kind == SOURCE_KIND_IMU
+
+    @property
+    def has_mag(self) -> bool:
+        return bool(self.sensors & IMU_MAG)
+
+
+def _parse_source_info(buf: bytes, p: int, length: int, src: int, fmt: int) -> Optional[SourceInfo]:
+    """A SOURCE_INFO payload, or None if it's malformed. Kinds this parser
+    doesn't know are returned with just the common header filled in."""
+    if fmt < 3:
+        # Formats 1-2: IMUs only, one layout; a sensitivity of 0 means no such sensor.
+        if length < IMU_SOURCE_INFO_V2.size or buf[p] not in DEVICE_NAMES:
+            return None
+        dev, port, addr, has_mag, odr, hg, acc, gy, mag = IMU_SOURCE_INFO_V2.unpack_from(buf, p)
+        sensors = IMU_ACCEL | IMU_GYRO | (IMU_MAG if has_mag else 0) | (IMU_ACCEL_HG if hg else 0)
+        return SourceInfo(src, SOURCE_KIND_IMU, dev, port.decode("ascii"), addr, sensors,
+                          accel_hz=odr, gyro_hz=odr, hg_hz=odr if hg else 0.0,
+                          accel_mg_per_lsb=acc, gyro_mdps_per_lsb=gy,
+                          mag_mG_per_lsb=mag if has_mag else 0.0, hg_mg_per_lsb=hg)
+    if length < SOURCE_HEADER.size:
+        return None
+    kind, dev, port = SOURCE_HEADER.unpack_from(buf, p)
+    info = SourceInfo(src, kind, dev, port.decode("ascii", errors="replace"))
+    if kind != SOURCE_KIND_IMU:
+        return info
+    q = p + SOURCE_HEADER.size
+    if length < SOURCE_HEADER.size + IMU_INFO.size:
+        return None
+    info.i2c_addr, info.sensors = IMU_INFO.unpack_from(buf, q)
+    q += IMU_INFO.size
+    n_pairs = bin(info.sensors).count("1")
+    if length != SOURCE_HEADER.size + IMU_INFO.size + n_pairs * IMU_SENSOR_PAIR.size:
+        return None
+    # One pair per set bit, in bit order; pairs for bits not known yet are skipped.
+    for bit in range(8):
+        if not info.sensors & (1 << bit):
+            continue
+        rate, scale = IMU_SENSOR_PAIR.unpack_from(buf, q)
+        q += IMU_SENSOR_PAIR.size
+        name = IMU_SENSOR_NAMES.get(1 << bit)
+        if name == "accel":
+            info.accel_hz, info.accel_mg_per_lsb = rate, scale
+        elif name == "gyro":
+            info.gyro_hz, info.gyro_mdps_per_lsb = rate, scale
+        elif name == "mag":
+            info.mag_hz, info.mag_mG_per_lsb = rate, scale
+        elif name == "accel_hg":
+            info.hg_hz, info.hg_mg_per_lsb = rate, scale
+    return info
 
 
 @dataclass
@@ -288,10 +367,10 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
                         first = p + fifo_hdr
                         fifo_slices.setdefault(src, []).append(mv[first : first + count * entry_len])
                     blocks.setdefault(src, []).append((len(record_slices), flags, read_us, count))
-                elif btype == BLOCK_SOURCE_INFO and buf[p] in DEVICE_NAMES and length >= IMU_SOURCE_INFO.size:
-                    dev, port, addr, has_mag, odr, hg, acc, gy, mag = IMU_SOURCE_INFO.unpack_from(buf, p)
-                    sources[src] = SourceInfo(src, dev, port.decode("ascii"), addr, bool(has_mag),
-                                              odr, hg, acc, gy, mag)
+                elif btype == BLOCK_SOURCE_INFO:
+                    info = _parse_source_info(buf, p, length, src, fmt)
+                    if info is not None:
+                        sources[src] = info
                 i = end
                 continue
         # Not a valid block here: resync at the next sync byte.
@@ -428,6 +507,8 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
     data = StreamData(stream.fw_version, records, truncated=stream.truncated,
                       skipped_bytes=stream.skipped_bytes)
     for src, info in stream.sources.items():
+        if not info.is_imu:
+            continue  # a kind this parser can't decode yet
         entries = stream.fifo.get(src, np.zeros(0, dtype=FIFO_ENTRY_DTYPE))
         data.imu[info.port] = decode_imu(entries, info, t0, stream.blocks.get(src, []), record_t)
     return data
