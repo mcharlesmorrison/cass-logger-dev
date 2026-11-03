@@ -959,8 +959,8 @@ class CassCommands:
 
     @classmethod
     def process_stream_file(cls, full_filename: Union[str, Path], fw_ver: Optional[str] = None) -> StreamData:
-        """Parse a block stream file (``i2c_320g`` variants, and ``i2c_45686``
-        from 0.13) into DataFrames.
+        """Parse a logger file into DataFrames: a block stream file (every
+        variant from 0.13), or an older file given its ``fw_ver``.
 
         Returns a ``StreamData``: ``records`` is the 500 Hz record DataFrame
         (as from ``process_data_file``), and ``imu`` maps port letter ("C",
