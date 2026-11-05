@@ -85,7 +85,7 @@ imu.accel, imu.gyro          # t, tmicros, x, y, z [mg] / [dps], t_edge, t_fit
 imu.accel_hg                 # LSM6DSV320X high-g accelerometer [mg] (±320 g); empty for the ICM-45686
 imu.mag, imu.timestamp       # [µT], raw IMU timestamp counter
 imu.events                   # FIFO overruns, failed/late reads, timing lost/re-established
-imu.reads                    # each FIFO read's time and entry count (format 2+)
+imu.reads                    # each FIFO read's time and entry count
 ```
 
 All times share the records' zero. How good a sample's time is: `t_edge` is True when it's the sample's INT1 (data-ready) edge (LSM6DSV320X); `t_fit` when it comes from a converged fit of the IMU's own sample clock (ICM-20948, ICM-45686, which have no INT pin wired; ~1 s after recording starts). With neither, the time is an estimate; `events` shows where timing was lost.

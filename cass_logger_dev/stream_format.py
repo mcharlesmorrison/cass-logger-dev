@@ -1,8 +1,7 @@
 """
 Block stream file format: parsing and decoding.
 
-Firmware variants with FIFO IMUs (``i2c_320g``, ``i2c_320g_2``, and from 0.13
-``i2c_45686``, ``i2c_45686_2``) write one file of tagged blocks instead of
+From firmware 0.13 every variant writes one file of tagged blocks instead of
 back-to-back datrec structs.
 Every block is a 5-byte header and a payload, all little-endian and packed::
 
@@ -16,11 +15,8 @@ then interleaves RECORD blocks (one datrec per 500 Hz tick) and FIFO blocks
 (every FIFO word an IMU produced, each with its own time). All times are
 ``filemicros`` (µs), the same clock as the datrec ``tmicros``.
 
-Format version 2 added each FIFO block's read time and the T_FIT entry flag
-(sample times from a fit of the IMU's own clock, for IMUs with no data-ready
-pin). Version 3 made SOURCE_INFO start with a source kind, and gave IMUs a
-sensor bitmask with a rate and scale per fitted sensor. Versions 1 and 2
-still parse.
+This parser reads format version 3, the first released version. Versions 1
+and 2 were only written by 0.13 development builds and are rejected.
 
 This module does no serial I/O, so it can be tested without hardware. Full
 spec: ``docs/stream-format.md`` in cass-logger-fw.
@@ -40,7 +36,7 @@ from .firmware_structs import COLUMN_ORDERS, FIRMWARE_DTYPES
 
 SYNC = 0xA5
 MAGIC = b"CASS"
-FORMAT_VERSIONS = (1, 2, 3)
+FORMAT_VERSIONS = (3,)
 
 BLOCK_FILE_HEADER = 0x01
 BLOCK_SOURCE_INFO = 0x02
@@ -51,8 +47,8 @@ KNOWN_BLOCKS = {BLOCK_FILE_HEADER, BLOCK_SOURCE_INFO, BLOCK_RECORD, BLOCK_FIFO}
 HEADER_LEN = 5
 FILE_HEADER = struct.Struct("<4sH16sHHB")  # magic, format_version, fw_version, record_rate_hz, record_len, n_sources
 
-# FIFO block header: flags, entry count, and (v2) the read time.
-FIFO_HEADER_LEN = {1: 2, 2: 6, 3: 6}
+# FIFO block header: flags, entry count, read time.
+FIFO_HEADER = struct.Struct("<BBI")
 
 # FIFO block flags: events since the source's previous block.
 FIFO_BLOCK_FLAGS = {
@@ -92,7 +88,7 @@ TAG_MAG = 0x0E
 TAG_MAG_NACK = 0x19
 TAG_ACCEL_HG = 0x1D
 
-# SOURCE_INFO, format 3+: a common header (source_kind, device_type, port),
+# SOURCE_INFO: a common header (source_kind, device_type, port),
 # then a kind-specific part. IMU: i2c_addr, sensors bitmask, then one
 # (rate_hz, scale) pair per set bit, in bit order.
 SOURCE_HEADER = struct.Struct("<BBc")
@@ -106,10 +102,6 @@ IMU_GYRO = 0x02
 IMU_MAG = 0x04
 IMU_ACCEL_HG = 0x08
 IMU_SENSOR_NAMES = {IMU_ACCEL: "accel", IMU_GYRO: "gyro", IMU_MAG: "mag", IMU_ACCEL_HG: "accel_hg"}
-
-# SOURCE_INFO, formats 1 and 2 (IMUs only): device_type, port, i2c_addr,
-# has_mag, odr_hz, then hg / accel / gyro / mag sensitivities.
-IMU_SOURCE_INFO_V2 = struct.Struct("<BcBB5f")
 
 
 class StreamFormatError(ValueError):
@@ -153,19 +145,9 @@ class SourceInfo:
         return bool(self.sensors & IMU_MAG)
 
 
-def _parse_source_info(buf: bytes, p: int, length: int, src: int, fmt: int) -> Optional[SourceInfo]:
+def _parse_source_info(buf: bytes, p: int, length: int, src: int) -> Optional[SourceInfo]:
     """A SOURCE_INFO payload, or None if it's malformed. Kinds this parser
     doesn't know are returned with just the common header filled in."""
-    if fmt < 3:
-        # Formats 1-2: IMUs only, one layout; a sensitivity of 0 means no such sensor.
-        if length < IMU_SOURCE_INFO_V2.size or buf[p] not in DEVICE_NAMES:
-            return None
-        dev, port, addr, has_mag, odr, hg, acc, gy, mag = IMU_SOURCE_INFO_V2.unpack_from(buf, p)
-        sensors = IMU_ACCEL | IMU_GYRO | (IMU_MAG if has_mag else 0) | (IMU_ACCEL_HG if hg else 0)
-        return SourceInfo(src, SOURCE_KIND_IMU, dev, port.decode("ascii"), addr, sensors,
-                          accel_hz=odr, gyro_hz=odr, hg_hz=odr if hg else 0.0,
-                          accel_mg_per_lsb=acc, gyro_mdps_per_lsb=gy,
-                          mag_mG_per_lsb=mag if has_mag else 0.0, hg_mg_per_lsb=hg)
     if length < SOURCE_HEADER.size:
         return None
     kind, dev, port = SOURCE_HEADER.unpack_from(buf, p)
@@ -205,8 +187,8 @@ class StreamFile:
     ``records`` are the raw datrec structs. ``fifo`` maps source id to its raw
     FIFO entries (``FIFO_ENTRY_DTYPE``) in file order. ``blocks`` maps source id
     to one ``(record_index, flags, read_us, count)`` per FIFO block: the record
-    index is how many RECORD blocks came before it, and read_us (format 2+, else
-    None) the filemicros time of its FIFO read.
+    index is how many RECORD blocks came before it, and read_us the filemicros
+    time of its FIFO read.
     """
 
     fw_version: str
@@ -216,7 +198,7 @@ class StreamFile:
     sources: dict[int, SourceInfo]
     records: np.ndarray
     fifo: dict[int, np.ndarray]
-    blocks: dict[int, list[tuple[int, int, Optional[int], int]]]
+    blocks: dict[int, list[tuple[int, int, int, int]]]
     truncated: bool = False   # the last block ran past the end of the file
     skipped_bytes: int = 0    # bytes dropped while resyncing after corruption
 
@@ -241,7 +223,7 @@ class ImuData:
     mag: pd.DataFrame         # x, y, z [µT]
     timestamp: pd.DataFrame   # raw IMU timestamp counter: ticks (LSM ~22.2 µs, ICM 1 µs)
     events: pd.DataFrame      # tmicros, t, and one bool column per FIFO_BLOCK_FLAGS name
-    reads: pd.DataFrame       # one row per FIFO block: tmicros, t of its read (format 2+), entries
+    reads: pd.DataFrame       # one row per FIFO block: tmicros, t of its read, entries
     mag_nacks: int            # LSM6DSV320X sensor hub cycles where the QMC6309 didn't answer
     unknown_words: int        # FIFO words with an unexpected tag
 
@@ -285,12 +267,13 @@ def _record_dtype(fw_version: str, record_len: Optional[int] = None) -> tuple[np
     return FIRMWARE_DTYPES[key]().newbyteorder("<"), COLUMN_ORDERS[key]
 
 
-def _block_ok(buf: bytes, i: int, btype: int, length: int, record_len: int, fifo_hdr: int) -> bool:
+def _block_ok(buf: bytes, i: int, btype: int, length: int, record_len: int) -> bool:
     """Checks a block's length against what its type allows."""
     if btype == BLOCK_RECORD:
         return length == record_len
     if btype == BLOCK_FIFO:
-        return length >= fifo_hdr and length == fifo_hdr + FIFO_ENTRY_DTYPE.itemsize * buf[i + HEADER_LEN + 1]
+        return (length >= FIFO_HEADER.size
+                and length == FIFO_HEADER.size + FIFO_ENTRY_DTYPE.itemsize * buf[i + HEADER_LEN + 1])
     if btype == BLOCK_FILE_HEADER:
         return length == FILE_HEADER.size
     return length >= 1  # SOURCE_INFO: device-specific
@@ -318,9 +301,11 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
         raise StreamFormatError("Not a block stream file (no FILE_HEADER at the start)")
 
     magic, fmt, fw, rate, record_len, _n_sources = FILE_HEADER.unpack_from(buf, HEADER_LEN)
+    if fmt in (1, 2):
+        raise StreamFormatError(f"Stream format version {fmt} was only written by 0.13 development "
+                                f"builds and isn't supported")
     if fmt not in FORMAT_VERSIONS:
         raise StreamFormatError(f"Unsupported stream format version {fmt} (parser knows {FORMAT_VERSIONS})")
-    fifo_hdr = FIFO_HEADER_LEN[fmt]
     fw_version = fw.split(b"\0", 1)[0].decode("ascii", errors="replace")
     try:
         rec_dtype, _ = _record_dtype(fw_version, record_len)
@@ -335,7 +320,7 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
     sources: dict[int, SourceInfo] = {}
     record_slices: list[memoryview] = []
     fifo_slices: dict[int, list[memoryview]] = {}
-    blocks: dict[int, list[tuple[int, int, Optional[int], int]]] = {}
+    blocks: dict[int, list[tuple[int, int, int, int]]] = {}
     truncated = False
     skipped = 0
     entry_len = FIFO_ENTRY_DTYPE.itemsize
@@ -354,21 +339,20 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
             if end > n:
                 if past_end_skipped is None:
                     past_end_skipped = skipped
-            elif _block_ok(buf, i, btype, length, record_len, fifo_hdr):
+            elif _block_ok(buf, i, btype, length, record_len):
                 past_end_skipped = None
                 src = buf[i + 2]
                 p = i + HEADER_LEN
                 if btype == BLOCK_RECORD:
                     record_slices.append(mv[p:end])
                 elif btype == BLOCK_FIFO:
-                    flags, count = buf[p], buf[p + 1]
-                    read_us = struct.unpack_from("<I", buf, p + 2)[0] if fmt >= 2 else None
+                    flags, count, read_us = FIFO_HEADER.unpack_from(buf, p)
                     if count:
-                        first = p + fifo_hdr
+                        first = p + FIFO_HEADER.size
                         fifo_slices.setdefault(src, []).append(mv[first : first + count * entry_len])
                     blocks.setdefault(src, []).append((len(record_slices), flags, read_us, count))
                 elif btype == BLOCK_SOURCE_INFO:
-                    info = _parse_source_info(buf, p, length, src, fmt)
+                    info = _parse_source_info(buf, p, length, src)
                     if info is not None:
                         sources[src] = info
                 i = end
@@ -427,12 +411,10 @@ def _xyz_frame(entries: np.ndarray, scale: float, t0: int) -> pd.DataFrame:
 
 
 def decode_imu(entries: np.ndarray, info: SourceInfo, t0: int,
-               blocks: list[tuple[int, int, Optional[int], int]], record_tmicros: np.ndarray) -> ImuData:
+               blocks: list[tuple[int, int, int, int]]) -> ImuData:
     """Decode one IMU source's raw FIFO entries into physical units.
 
-    ``t0`` is the raw (unwrapped) tmicros that becomes zero, and
-    ``record_tmicros`` the zero-referenced record times, used to place events
-    in format 1 files (which don't record read times).
+    ``t0`` is the raw (unwrapped) tmicros that becomes zero.
     """
     sensor = entries["tag"] >> 3
     pick = lambda code: entries[sensor == code]  # noqa: E731
@@ -442,15 +424,8 @@ def decode_imu(entries: np.ndarray, info: SourceInfo, t0: int,
     ts_cols["ticks"] = ts["data"][:, :4].copy().view("<u4").ravel()
     ts_cols.update(_time_flags(ts))
 
-    # Each block's time: its read time (format 2+), else the record before it
-    # (within one 2 ms tick).
-    if blocks and blocks[0][2] is not None:
-        block_t = unwrap_u32(np.array([b[2] for b in blocks], dtype=np.int64)) - t0
-    elif blocks and len(record_tmicros):
-        idx = np.clip(np.array([b[0] for b in blocks]) - 1, 0, len(record_tmicros) - 1)
-        block_t = record_tmicros[idx]
-    else:
-        block_t = np.zeros(len(blocks), dtype=np.int64)
+    # Each block's time: the time of its FIFO read.
+    block_t = unwrap_u32(np.array([b[2] for b in blocks], dtype=np.int64)) - t0
     block_flags = np.array([b[1] for b in blocks], dtype=np.int64)
 
     has_flags = block_flags != 0
@@ -460,8 +435,6 @@ def decode_imu(entries: np.ndarray, info: SourceInfo, t0: int,
 
     reads = pd.DataFrame({"tmicros": block_t, "t": block_t * 1e-6,
                           "entries": np.array([b[3] for b in blocks], dtype=np.int64)})
-    if not blocks or blocks[0][2] is None:
-        reads = reads.iloc[0:0]  # format 1: no read times
 
     known = {TAG_GYRO, TAG_ACCEL, TAG_TIMESTAMP, TAG_MAG, TAG_MAG_NACK, TAG_ACCEL_HG}
     return ImuData(
@@ -502,7 +475,6 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
     """
     stream = source if isinstance(source, StreamFile) else read_stream(source)
     records, t0 = records_frame(stream)
-    record_t = records["tmicros"].to_numpy()
 
     data = StreamData(stream.fw_version, records, truncated=stream.truncated,
                       skipped_bytes=stream.skipped_bytes)
@@ -510,7 +482,7 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
         if not info.is_imu:
             continue  # a kind this parser can't decode yet
         entries = stream.fifo.get(src, np.zeros(0, dtype=FIFO_ENTRY_DTYPE))
-        data.imu[info.port] = decode_imu(entries, info, t0, stream.blocks.get(src, []), record_t)
+        data.imu[info.port] = decode_imu(entries, info, t0, stream.blocks.get(src, []))
     return data
 
 

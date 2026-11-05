@@ -49,17 +49,14 @@ def file_header(fw: str = FW, n_sources: int = 1, version: int = 3) -> bytes:
 
 def imu_source_info(source: int, device: int, port: bytes, addr: int, sensors: int, pairs: list,
                     kind: int = 1) -> bytes:
-    """Format 3+ SOURCE_INFO: common header, IMU part, one (rate, scale) pair per set bit."""
+    """SOURCE_INFO: common header, IMU part, one (rate, scale) pair per set bit."""
     payload = struct.pack("<BBcBB", kind, device, port, addr, sensors)
     payload += b"".join(struct.pack("<ff", r, s) for r, s in pairs)
     return block(BLOCK_SOURCE_INFO, source, payload)
 
 
-def source_info(source: int = 1, port: bytes = b"C", version: int = 3) -> bytes:
+def source_info(source: int = 1, port: bytes = b"C") -> bytes:
     """An LSM6DSV320X + QMC6309 source."""
-    if version < 3:
-        payload = struct.pack("<BcBB5f", DEVICE_LSM6DSV320X, port, 0x6B, 1, 960.0, 10.417, 0.488, 70.0, 1.0)
-        return block(BLOCK_SOURCE_INFO, source, payload)
     # accel, gyro, mag, high-g
     return imu_source_info(source, DEVICE_LSM6DSV320X, port, 0x6B, 0x0F,
                            [(960.0, 0.488), (960.0, 70.0), (120.0, 1.0), (960.0, 10.417)])
@@ -84,20 +81,20 @@ def entry(t_us: int, sensor: int, xyz=(0, 0, 0), flags: int = FIFO_ENTRY_T_EDGE,
     return struct.pack("<IBB", t_us & 0xFFFFFFFF, (sensor << 3) | 0b010, flags) + data
 
 
-def fifo(entries: list, source: int = 1, flags: int = 0, read_us: int = 0, version: int = 3) -> bytes:
-    header = bytes([flags, len(entries)]) + (struct.pack("<I", read_us & 0xFFFFFFFF) if version >= 2 else b"")
+def fifo(entries: list, source: int = 1, flags: int = 0, read_us: int = 0) -> bytes:
+    header = struct.pack("<BBI", flags, len(entries), read_us & 0xFFFFFFFF)
     return block(BLOCK_FIFO, source, header + b"".join(entries))
 
 
-def tick(t: int, source: int = 1, version: int = 3) -> bytes:
+def tick(t: int, source: int = 1) -> bytes:
     """One collector tick: gyro, low-g, high-g of one ODR instant, then the record."""
     return fifo([entry(t - 500, TAG_GYRO, (1, 2, 3)),
                  entry(t - 500, TAG_ACCEL, (4, 5, 6)),
-                 entry(t - 500, TAG_ACCEL_HG, (7, 8, 9))], source, read_us=t - 200, version=version) + record(t)
+                 entry(t - 500, TAG_ACCEL_HG, (7, 8, 9))], source, read_us=t - 200) + record(t)
 
 
-def stream(*parts: bytes, n_sources: int = 1, version: int = 3) -> bytes:
-    return file_header(n_sources=n_sources, version=version) + source_info(version=version) + b"".join(parts)
+def stream(*parts: bytes, n_sources: int = 1) -> bytes:
+    return file_header(n_sources=n_sources) + source_info() + b"".join(parts)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -168,13 +165,12 @@ def test_parse_and_decode():
     assert list(imu.reads["entries"]) == [3, 3, 3]
 
 
-def test_format_1_still_parses():
-    data = stream(tick(40000, version=1), tick(42000, version=1), version=1)
-    s = read_stream(data)
-    assert s.format_version == 1 and not s.truncated and s.skipped_bytes == 0
-    imu = process_stream(data).imu["C"]
-    assert list(imu.accel_hg["tmicros"]) == [-500, 1500]
-    assert imu.reads.empty  # format 1 has no read times
+@pytest.mark.parametrize("version", [1, 2, 4])
+def test_other_format_versions_rejected(version):
+    # 1 and 2 were only written by 0.13 development builds.
+    data = file_header(version=version) + source_info() + tick(40000)
+    with pytest.raises(StreamFormatError, match=f"version {version}"):
+        read_stream(data)
 
 
 def test_icm45686_source():
@@ -223,12 +219,6 @@ def test_events():
     assert ev["tmicros"].tolist() == [1800, 3800]  # each block's read time
 
 
-def test_events_format_1():
-    data = stream(tick(40000, version=1), fifo([], flags=0x08, version=1), record(42000), version=1)
-    ev = process_stream(data).imu["C"].events
-    assert ev["tmicros"].tolist() == [0]  # no read times: the record before the block
-
-
 def test_truncated_last_block():
     data = stream(tick(40000), tick(42000))
     s = read_stream(data[:-10])
@@ -268,7 +258,7 @@ def test_process_data_file_detects_stream(tmp_path):
     assert "C" in CassCommands.process_stream_file(path).imu
 
 
-@pytest.mark.skipif(not REAL_LOG.exists(), reason="example log not present")
+@pytest.mark.skip(reason="example log is stream format v1/v2 (0.13 dev build); needs a new v3 recording")
 def test_real_log():
     d = CassCommands.process_stream_file(REAL_LOG)
     assert d.fw_version.startswith("0.13-") and d.skipped_bytes == 0
@@ -317,7 +307,7 @@ def test_legacy_file_through_process_stream_file():
     assert not d.imu["C"].accel["t_fit"].any() and d.imu["C"].accel_hg.empty
 
 
-@pytest.mark.skipif(not REAL_LOG_2.exists(), reason="example log not present")
+@pytest.mark.skip(reason="example log is stream format v1/v2 (0.13 dev build); needs a new v3 recording")
 def test_real_log_two_fifo_imus():
     d = CassCommands.process_stream_file(REAL_LOG_2)
     assert d.fw_version == "0.13-i2c_45686" and d.skipped_bytes == 0
@@ -333,19 +323,13 @@ def test_real_log_two_fifo_imus():
         assert imu.events[["overrun", "read_failed", "late", "sync_lost"]].to_numpy().sum() == 0
 
 
-# ── SOURCE_INFO, format 3 ────────────────────────────────────────────────────
+# ── SOURCE_INFO ────────────────────────────────────────────────────────────
 
 def test_source_info_v3_all_sensors():
     s = read_stream(stream(tick(40000))).sources[1]
     assert s.is_imu and s.device == "LSM6DSV320X + QMC6309" and s.port == "C" and s.i2c_addr == 0x6B
     assert s.sensors == 0x0F and s.has_mag
     assert (s.accel_hz, s.gyro_hz, s.mag_hz, s.hg_hz) == (960.0, 960.0, 120.0, 960.0)
-    assert s.hg_mg_per_lsb == pytest.approx(10.417)
-
-
-def test_source_info_v2_still_parses():
-    s = read_stream(stream(tick(40000, version=2), version=2)).sources[1]
-    assert s.sensors == 0x0F and s.accel_hz == 960.0 and s.mag_hz == 0.0  # v2 had no per-sensor rates
     assert s.hg_mg_per_lsb == pytest.approx(10.417)
 
 
