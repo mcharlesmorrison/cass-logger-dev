@@ -30,6 +30,7 @@ from .firmware_structs import (
 from .stream_format import (
     StreamData,
     is_stream_file,
+    read_file_info,
     legacy_stream_data,
     process_stream,
     read_stream,
@@ -45,6 +46,9 @@ from .live import (
 from typing import Optional, Union, Dict, List
 import re
 import platform
+
+# Longest device ID the firmware stores (DEVICE_ID_LEN in cass-logger-fw commands.h).
+DEVICE_ID_MAX_LEN = 5
 
 
 class CassCommands:
@@ -510,11 +514,12 @@ class CassCommands:
         return filepath
 
     def download_all(self):
-        """Download all files from the device and write a metadata file.
+        """Download all files from the device.
 
-        Files are saved to a timestamped directory (tmp_<unix>). A
-        metadata.txt file containing the firmware version and device ID
-        is written alongside them.
+        Files are saved to a timestamped directory (tmp_<unix>). If any of
+        them is a pre-0.13 file, a metadata.txt with the firmware version and
+        device ID is written alongside them; 0.13+ files carry both in their
+        FILE_HEADER (see ``needs_metadata_txt``).
 
         Returns
         -------
@@ -534,15 +539,29 @@ class CassCommands:
         ]
 
         self._flush_all()
-        # write metadata
-        fw_ver = self.get_fw_ver()
-        device_id = self.get_device_ID()
+        if self.needs_metadata_txt(Path(dir_name, f) for f in my_filenames):
+            self.write_metadata_txt(dir_name, self.get_fw_ver(), self.get_device_ID())
+
+        return filepaths[-1]
+
+    @staticmethod
+    def needs_metadata_txt(paths) -> bool:
+        """True if any of the downloaded files is a pre-0.13 file.
+
+        Those are raw datrec structs with no header, so the firmware version
+        and device ID have to go in a metadata.txt next to them. 0.13+ files
+        carry both in their FILE_HEADER.
+        """
+        return any(not is_stream_file(p) for p in paths)
+
+    @staticmethod
+    def write_metadata_txt(dir_name: Union[str, Path], fw_ver: str, device_id: str) -> Path:
+        """Write the metadata.txt that pre-0.13 downloads need."""
         md_path = Path(dir_name, "metadata.txt")
         with open(md_path, "w") as meta_file:
             meta_file.write(f"Firmware Ver: {fw_ver}\n")
             meta_file.write(f"Device ID: {device_id}\n")
-
-        return filepaths[-1]
+        return md_path
 
     def put_device_ID(self, device_ID):
         """Write a device identifier string to EEPROM.
@@ -550,13 +569,25 @@ class CassCommands:
         Parameters
         ----------
         device_ID : str
-            Identifier to write (must not contain 'x', used as terminator).
+            Identifier to write: 1 to ``DEVICE_ID_MAX_LEN`` printable ASCII
+            characters, without 'x' (the reply terminator).
 
         Returns
         -------
         bool
             True if the device echoed back the correct ID, False otherwise.
+
+        Raises
+        ------
+        ValueError
+            If ``device_ID`` isn't a valid ID. The firmware stores at most
+            ``DEVICE_ID_MAX_LEN`` characters and echoes what it stored, so a
+            longer ID would leave this waiting for an echo that never comes.
         """
+        if not (1 <= len(device_ID) <= DEVICE_ID_MAX_LEN):
+            raise ValueError(f"Device ID must be 1 to {DEVICE_ID_MAX_LEN} characters, got {device_ID!r}")
+        if not (device_ID.isascii() and device_ID.isprintable()) or "x" in device_ID:
+            raise ValueError(f"Device ID must be printable ASCII without 'x', got {device_ID!r}")
         self.ser_command.write(b"p")    # eeprom put
         device_ID_orig = device_ID
         device_ID += "x"
@@ -823,22 +854,14 @@ class CassCommands:
     }
 
     # Record layouts from firmware 0.13, when every variant moved to the block
-    # stream format (process_stream_file). Newest first: the first 0.13 test
-    # builds (stream_1 / stream_2) still had the SPI IMU in the record, so with
-    # the record length known (stream files and live view frames carry it), the
-    # layout of that length is picked.
+    # stream format (process_stream_file).
     STREAM_LAYOUTS = {
-        "std":          ["analog_18"],
-        "std_DEF-dig":  ["analog_18"],
-        "i2c_45686":    ["analog_15", "stream_1"],
-        "i2c_45686_2":  ["analog_12", "stream_2"],
-        "i2c_320g":     ["analog_15", "stream_1"],
-        "i2c_320g_2":   ["analog_12", "stream_2"],
-        # Pre-release 0.13 builds named i2c_320x; get_fw_ver() cut that at the 'x'
-        # (its reply terminator), so their metadata.txt says "i2c_320".
-        "i2c_320x":     ["analog_15", "stream_1"],
-        "i2c_320":      ["analog_15", "stream_1"],
-        "i2c_320x_2":   ["analog_12", "stream_2"],
+        "std":          "analog_18",
+        "std_DEF-dig":  "analog_18",
+        "i2c_45686":    "analog_15",
+        "i2c_45686_2":  "analog_12",
+        "i2c_320g":     "analog_15",
+        "i2c_320g_2":   "analog_12",
     }
     STREAM_FROM_VERSION = (0, 13)
 
@@ -853,7 +876,7 @@ class CassCommands:
             Format is "<version>-<variant>" or just "<version>".
         record_len : int, optional
             The record's size in bytes, if known (stream file header, live view
-            frame). From 0.13 it picks between layouts a variant has had.
+            frame). From 0.13 it's checked against the variant's layout.
 
         Returns
         -------
@@ -881,15 +904,12 @@ class CassCommands:
             return "i2c_1_legacy"
 
         if version_tuple >= cls.STREAM_FROM_VERSION:
-            layouts = cls.STREAM_LAYOUTS.get(variant)
-            if layouts is None:
+            key = cls.STREAM_LAYOUTS.get(variant)
+            if key is None:
                 raise ValueError(f"No firmware {version} build of variant '{variant}' (from fw_ver='{fw_ver}')")
-            if record_len is None:
-                return layouts[0]
-            for key in layouts:
-                if FIRMWARE_DTYPES[key]().itemsize == record_len:
-                    return key
-            raise ValueError(f"No {record_len}-byte record layout for '{fw_ver}'")
+            if record_len is not None and FIRMWARE_DTYPES[key]().itemsize != record_len:
+                raise ValueError(f"No {record_len}-byte record layout for '{fw_ver}'")
+            return key
 
         dtype_key = cls.VARIANT_DTYPE_MAP.get(variant)
         if dtype_key is None:
@@ -999,6 +1019,11 @@ class CassCommands:
     ) -> Union[Dict[str, Optional[str]], List[Dict[str, Optional[str]]], None]:
         """Search for metadata files and return their parsed contents.
 
+        A download from 0.13+ firmware has no metadata.txt: its .bin files
+        carry the firmware version and device ID in their FILE_HEADER. When no
+        metadata file is found, those headers are returned instead, one dict
+        per block stream .bin file.
+
         Parameters
         ----------
         dir_path : str
@@ -1020,16 +1045,28 @@ class CassCommands:
         files = CassCommands._find_metadata_files(
             dir_path, filename=filename, recursive=recursive
         )
-        if not files:
-            return None
-
         parsed = []
-        for f in files:
-            try:
-                parsed.append(CassCommands._parse_metadata_file(str(f)))
-            except Exception as exc:
-                # skip files that fail to read/parse; optionally log the error
-                parsed.append({"error": f"failed to parse {f}: {exc}"})
+        if files:
+            for f in files:
+                try:
+                    parsed.append(CassCommands._parse_metadata_file(str(f)))
+                except Exception as exc:
+                    # skip files that fail to read/parse; optionally log the error
+                    parsed.append({"error": f"failed to parse {f}: {exc}"})
+        else:
+            root = Path(dir_path)
+            bins = sorted(root.rglob("*.bin") if recursive else root.glob("*.bin"))
+            for f in bins:
+                try:
+                    info = read_file_info(f)
+                except Exception as exc:
+                    parsed.append({"error": f"failed to read the header of {f}: {exc}"})
+                    continue
+                if info is not None:
+                    parsed.append({"firmware_version": info.fw_version,
+                                   "device_id": info.device_id or None})
+        if not parsed:
+            return None
 
         if first_only:
             return parsed[0]

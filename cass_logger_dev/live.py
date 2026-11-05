@@ -70,9 +70,6 @@ LIVE_FIFO_IMUS = {
     "i2c_45686_2":  [("S", False), ("C", False), ("E", False)],
     "i2c_320g":     [("S", False), ("C", True)],
     "i2c_320g_2":   [("S", False), ("C", True), ("E", True)],
-    "i2c_320x":     [("S", False), ("C", True)],
-    "i2c_320":      [("S", False), ("C", True)],
-    "i2c_320x_2":   [("S", False), ("C", True), ("E", True)],
 }
 
 

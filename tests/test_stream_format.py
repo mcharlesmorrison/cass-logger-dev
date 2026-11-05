@@ -27,12 +27,12 @@ from cass_logger_dev.stream_format import (
     StreamFormatError,
     is_stream_file,
     process_stream,
+    read_file_info,
     read_stream,
     unwrap_u32,
 )
 
 FW = "0.13-i2c_320g"
-REAL_LOG = Path(__file__).parent.parent / "examples" / "data" / "lsm6dsv320x-test_i2c_320g" / "LOG_1793206549.bin"
 
 
 # ── Builders: blocks exactly as docs/stream-format.md describes ──────────────
@@ -41,9 +41,10 @@ def block(btype: int, source: int, payload: bytes) -> bytes:
     return bytes([SYNC, btype, source]) + struct.pack("<H", len(payload)) + payload
 
 
-def file_header(fw: str = FW, n_sources: int = 1, version: int = 3) -> bytes:
+def file_header(fw: str = FW, n_sources: int = 1, version: int = 3, device_id: str = "AB123") -> bytes:
     rec_len = FIRMWARE_DTYPES[CassCommands.get_dtype_key(fw)]().itemsize
-    payload = struct.pack("<4sH16sHHB", b"CASS", version, fw.encode(), 500, rec_len, n_sources)
+    payload = struct.pack("<4sH16s8sHHB", b"CASS", version, fw.encode(), device_id.encode(),
+                          500, rec_len, n_sources)
     return block(BLOCK_FILE_HEADER, 0, payload)
 
 
@@ -112,8 +113,6 @@ def test_record_sizes_match_firmware(fw_ver, size):
 @pytest.mark.parametrize("fw_ver,key", [
     ("0.12-std", "std"), ("0.13-std", "analog_18"), ("0.14-std", "analog_18"),
     ("0.13-i2c_320g", "analog_15"), ("0.13-i2c_320g_2", "analog_12"),
-    # pre-release names: i2c_320x, and "i2c_320" as cut short by get_fw_ver()
-    ("0.13-i2c_320x", "analog_15"), ("0.13-i2c_320", "analog_15"), ("0.13-i2c_320x_2", "analog_12"),
     ("0.12-i2c_45686", "i2c_1"), ("0.13-i2c_45686", "analog_15"),
     ("0.12-i2c_45686_2", "i2c_2"), ("0.13-i2c_45686_2", "analog_12"),
 ])
@@ -121,14 +120,8 @@ def test_dtype_keys(fw_ver, key):
     assert CassCommands.get_dtype_key(fw_ver) == key
 
 
-# The first 0.13 test builds still had the SPI IMU in the record: the record
-# length (from the file header or live frame) picks that layout.
-@pytest.mark.parametrize("fw_ver,record_len,key", [
-    ("0.13-i2c_320x", 72, "stream_1"), ("0.13-i2c_45686", 72, "stream_1"), ("0.13-i2c_45686_2", 64, "stream_2"),
-    ("0.13-i2c_45686", 36, "analog_15"),
-])
-def test_dtype_key_by_record_len(fw_ver, record_len, key):
-    assert CassCommands.get_dtype_key(fw_ver, record_len) == key
+def test_dtype_key_by_record_len():
+    assert CassCommands.get_dtype_key("0.13-i2c_45686", 36) == "analog_15"
 
 
 def test_dtype_key_unknown_record_len():
@@ -165,9 +158,16 @@ def test_parse_and_decode():
     assert list(imu.reads["entries"]) == [3, 3, 3]
 
 
+def test_device_id():
+    s = read_stream(file_header() + source_info() + tick(40000))
+    assert s.device_id == "AB123"
+    assert process_stream(file_header() + source_info() + tick(40000)).device_id == "AB123"
+    # Never set: all NULs.
+    assert read_stream(file_header(device_id="") + source_info() + tick(40000)).device_id == ""
+
+
 @pytest.mark.parametrize("version", [1, 2, 4])
 def test_other_format_versions_rejected(version):
-    # 1 and 2 were only written by 0.13 development builds.
     data = file_header(version=version) + source_info() + tick(40000)
     with pytest.raises(StreamFormatError, match=f"version {version}"):
         read_stream(data)
@@ -258,21 +258,6 @@ def test_process_data_file_detects_stream(tmp_path):
     assert "C" in CassCommands.process_stream_file(path).imu
 
 
-@pytest.mark.skip(reason="example log is stream format v1/v2 (0.13 dev build); needs a new v3 recording")
-def test_real_log():
-    d = CassCommands.process_stream_file(REAL_LOG)
-    assert d.fw_version.startswith("0.13-") and d.skipped_bytes == 0
-    imu = d.imu["C"]
-    hg = imu.accel_hg
-    assert len(hg) == len(imu.accel) == len(imu.gyro) > 8000
-    assert hg["t_edge"].all() and imu.events.empty
-    period = hg["tmicros"].diff().dropna()
-    assert period.between(1060, 1075).all()  # IMU clock ~936.7 Hz
-    # Low-g and gyro share their high-g sample's time.
-    assert set(imu.accel["tmicros"]) == set(hg["tmicros"]) == set(imu.gyro["tmicros"])
-
-
-REAL_LOG_2 = Path(__file__).parent.parent / "examples" / "data" / "icm20948-icm45686-fifo_i2c_45686" / "LOG_1793290048.bin"
 LEGACY_LOG = Path(__file__).parent.parent / "examples" / "data" / "icm45686-test-9dof_800" / "LOG_1783595119.bin"
 
 
@@ -305,22 +290,6 @@ def test_legacy_file_through_process_stream_file():
     assert (d.imu["S"].accel["x"].values == legacy["gx"].values).all()
     assert (d.imu["C"].mag["z"].values == legacy["Tz_i2c"].values).all()
     assert not d.imu["C"].accel["t_fit"].any() and d.imu["C"].accel_hg.empty
-
-
-@pytest.mark.skip(reason="example log is stream format v1/v2 (0.13 dev build); needs a new v3 recording")
-def test_real_log_two_fifo_imus():
-    d = CassCommands.process_stream_file(REAL_LOG_2)
-    assert d.fw_version == "0.13-i2c_45686" and d.skipped_bytes == 0
-    assert list(d.records.columns)[:3] == ["tmicros", "t", "a0"] and "gx" not in d.records.columns
-    s, c = d.imu["S"], d.imu["C"]
-    assert (s.device, c.device) == ("ICM-20948", "ICM-45686 + QMC6309")
-    for imu, lo, hi in ((s, 1080, 1180), (c, 780, 860)):
-        span = imu.accel["t"].iloc[-1] - imu.accel["t"].iloc[0]
-        assert lo < len(imu.accel) / span < hi
-        locked = imu.accel[imu.accel["t"] > 2.0]
-        assert locked["t_fit"].all()
-        assert locked["tmicros"].diff().dropna().std() < 2.0  # µs: regular sample times
-        assert imu.events[["overrun", "read_failed", "late", "sync_lost"]].to_numpy().sum() == 0
 
 
 # ── SOURCE_INFO ────────────────────────────────────────────────────────────
@@ -363,3 +332,14 @@ def test_source_info_length_must_match_sensors():
     # Bitmask says 3 sensors but only 2 pairs follow: the block is rejected.
     bad = imu_source_info(1, 2, b"C", 0x69, 0x07, [(800.0, 0.5), (800.0, 61.0)])
     assert 1 not in read_stream(file_header() + bad + record(40000)).sources
+
+
+def test_read_file_info(tmp_path):
+    f = tmp_path / "LOG_1.bin"
+    f.write_bytes(file_header(device_id="CX7") + source_info() + tick(40000))
+    info = read_file_info(f)
+    assert (info.fw_version, info.device_id, info.format_version, info.record_len) == (FW, "CX7", 3, 36)
+
+    legacy = tmp_path / "LOG_3.bin"
+    legacy.write_bytes(bytes(64))  # raw datrec structs, no header
+    assert read_file_info(legacy) is None

@@ -15,8 +15,7 @@ then interleaves RECORD blocks (one datrec per 500 Hz tick) and FIFO blocks
 (every FIFO word an IMU produced, each with its own time). All times are
 ``filemicros`` (µs), the same clock as the datrec ``tmicros``.
 
-This parser reads format version 3, the first released version. Versions 1
-and 2 were only written by 0.13 development builds and are rejected.
+This parser reads format version 3, the first released version.
 
 This module does no serial I/O, so it can be tested without hardware. Full
 spec: ``docs/stream-format.md`` in cass-logger-fw.
@@ -45,7 +44,7 @@ BLOCK_FIFO = 0x20
 KNOWN_BLOCKS = {BLOCK_FILE_HEADER, BLOCK_SOURCE_INFO, BLOCK_RECORD, BLOCK_FIFO}
 
 HEADER_LEN = 5
-FILE_HEADER = struct.Struct("<4sH16sHHB")  # magic, format_version, fw_version, record_rate_hz, record_len, n_sources
+FILE_HEADER = struct.Struct("<4sH16s8sHHB")  # magic, format_version, fw_version, device_id, record_rate_hz, record_len, n_sources
 
 # FIFO block header: flags, entry count, read time.
 FIFO_HEADER = struct.Struct("<BBI")
@@ -199,6 +198,7 @@ class StreamFile:
     records: np.ndarray
     fifo: dict[int, np.ndarray]
     blocks: dict[int, list[tuple[int, int, int, int]]]
+    device_id: str = ""       # "" if the logger's ID wasn't set
     truncated: bool = False   # the last block ran past the end of the file
     skipped_bytes: int = 0    # bytes dropped while resyncing after corruption
 
@@ -239,6 +239,7 @@ class StreamData:
     fw_version: str
     records: pd.DataFrame
     imu: dict[str, ImuData] = field(default_factory=dict)
+    device_id: str = ""       # "" for legacy files and loggers with no ID set
     truncated: bool = False
     skipped_bytes: int = 0
 
@@ -279,6 +280,55 @@ def _block_ok(buf: bytes, i: int, btype: int, length: int, record_len: int) -> b
     return length >= 1  # SOURCE_INFO: device-specific
 
 
+@dataclass
+class FileInfo:
+    """A stream file's FILE_HEADER: who wrote it and how to read its records."""
+
+    fw_version: str
+    device_id: str            # "" if the logger's ID wasn't set
+    format_version: int
+    record_rate_hz: int
+    record_len: int
+
+
+def _parse_file_header(buf: bytes) -> FileInfo:
+    """The FILE_HEADER at the start of buf (header block included)."""
+    if not _is_stream_header(buf):
+        raise StreamFormatError("Not a block stream file (no FILE_HEADER at the start)")
+    hdr_len = struct.unpack_from("<H", buf, 3)[0]
+    if hdr_len != FILE_HEADER.size or len(buf) < HEADER_LEN + FILE_HEADER.size:
+        raise StreamFormatError(f"FILE_HEADER is cut short or the wrong length ({hdr_len} bytes, "
+                                f"expected {FILE_HEADER.size})")
+    _magic, fmt, fw, dev, rate, record_len, _n_sources = FILE_HEADER.unpack_from(buf, HEADER_LEN)
+    if fmt not in FORMAT_VERSIONS:
+        raise StreamFormatError(f"Unsupported stream format version {fmt} (parser knows {FORMAT_VERSIONS})")
+    return FileInfo(
+        fw_version=fw.split(b"\0", 1)[0].decode("ascii", errors="replace"),
+        device_id=dev.split(b"\0", 1)[0].decode("ascii", errors="replace"),
+        format_version=fmt,
+        record_rate_hz=rate,
+        record_len=record_len,
+    )
+
+
+def read_file_info(path: Union[str, Path]) -> Optional[FileInfo]:
+    """A stream file's FILE_HEADER, without reading the rest of the file.
+
+    Returns None for a pre-0.13 file (raw datrec structs, no header): its
+    firmware version and device ID are only in the download's metadata.txt.
+
+    Raises
+    ------
+    StreamFormatError
+        If the header is unusable (see ``read_stream``).
+    """
+    with open(path, "rb") as f:
+        head = f.read(HEADER_LEN + FILE_HEADER.size)
+    if not _is_stream_header(head):
+        return None
+    return _parse_file_header(head)
+
+
 def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
     """Parse a block stream file (path or bytes) into raw arrays.
 
@@ -297,16 +347,9 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
     buf = bytes(buf)
     mv = memoryview(buf)
     n = len(buf)
-    if not _is_stream_header(buf):
-        raise StreamFormatError("Not a block stream file (no FILE_HEADER at the start)")
-
-    magic, fmt, fw, rate, record_len, _n_sources = FILE_HEADER.unpack_from(buf, HEADER_LEN)
-    if fmt in (1, 2):
-        raise StreamFormatError(f"Stream format version {fmt} was only written by 0.13 development "
-                                f"builds and isn't supported")
-    if fmt not in FORMAT_VERSIONS:
-        raise StreamFormatError(f"Unsupported stream format version {fmt} (parser knows {FORMAT_VERSIONS})")
-    fw_version = fw.split(b"\0", 1)[0].decode("ascii", errors="replace")
+    info = _parse_file_header(buf)
+    fw_version, device_id, fmt = info.fw_version, info.device_id, info.format_version
+    rate, record_len = info.record_rate_hz, info.record_len
     try:
         rec_dtype, _ = _record_dtype(fw_version, record_len)
     except ValueError as exc:
@@ -377,7 +420,7 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
         for src, slices in fifo_slices.items()
     }
     return StreamFile(fw_version, fmt, rate, record_len, sources, records, fifo, blocks,
-                      truncated, skipped)
+                      device_id, truncated, skipped)
 
 
 def unwrap_u32(values: np.ndarray) -> np.ndarray:
@@ -476,8 +519,8 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
     stream = source if isinstance(source, StreamFile) else read_stream(source)
     records, t0 = records_frame(stream)
 
-    data = StreamData(stream.fw_version, records, truncated=stream.truncated,
-                      skipped_bytes=stream.skipped_bytes)
+    data = StreamData(stream.fw_version, records, device_id=stream.device_id,
+                      truncated=stream.truncated, skipped_bytes=stream.skipped_bytes)
     for src, info in stream.sources.items():
         if not info.is_imu:
             continue  # a kind this parser can't decode yet

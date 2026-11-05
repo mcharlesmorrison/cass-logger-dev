@@ -4,7 +4,7 @@ NumPy dtype definitions and column orderings for each Cass Logger firmware varia
 Exports
 -------
 FIRMWARE_DTYPES : dict
-    Maps record layout keys ("std", "i2c_1", "i2c_2", "stream_1", ...) to their dtype constructor.
+    Maps record layout keys ("std", "i2c_1", "analog_15", ...) to their dtype constructor.
 COLUMN_ORDERS : dict
     Maps firmware key strings to the preferred DataFrame column order.
 """
@@ -217,85 +217,6 @@ def dtype_i2c_2():
     )
 
 
-def dtype_stream_1():
-    """Return the NumPy dtype for the record of the first 0.13 test builds with
-    a FIFO IMU on Port C (i2c_320g, i2c_45686), which still had the SPI IMU in
-    the record. Later 0.13 builds use dtype_analog_15.
-
-    The RECORD block of the block stream format (see ``stream_format``): the
-    i2c_1 layout without the I2C IMU fields, whose data is in FIFO blocks.
-    The c0-c2 ADC channels are absent (Port C is the IMU's I2C bus).
-    """
-    return np.dtype(
-        [
-            ("tmicros", "i4"),
-            ("d0", "i2"),
-            ("d1", "i2"),
-            ("d2", "i2"),
-            ("e0", "i2"),
-            ("e1", "i2"),
-            ("e2", "i2"),
-            ("f0", "i2"),
-            ("f1", "i2"),
-            ("f2", "i2"),
-            ("a0", "i2"),
-            ("a1", "i2"),
-            ("a2", "i2"),
-            ("b0", "i2"),
-            ("b1", "i2"),
-            ("b2", "i2"),
-            # 2-byte alignment pad before the floats (same as i2c_1).
-            ("_pad", "u2"),
-            ("gx", "f4"),
-            ("gy", "f4"),
-            ("gz", "f4"),
-            ("wx", "f4"),
-            ("wy", "f4"),
-            ("wz", "f4"),
-            ("Tx", "f4"),
-            ("Ty", "f4"),
-            ("Tz", "f4"),
-        ]
-    )
-
-
-def dtype_stream_2():
-    """Return the NumPy dtype for the record of the first 0.13 test builds with
-    FIFO IMUs on Ports C and E (i2c_320g_2, i2c_45686_2), which still had the
-    SPI IMU in the record. Later 0.13 builds use dtype_analog_12.
-
-    The RECORD block of the block stream format (see ``stream_format``): the
-    i2c_2 layout without the I2C IMU fields, whose data is in FIFO blocks.
-    The c0-c2 and e0-e2 ADC channels are absent (both ports are IMUs).
-    """
-    return np.dtype(
-        [
-            ("tmicros", "i4"),
-            ("d0", "i2"),
-            ("d1", "i2"),
-            ("d2", "i2"),
-            ("f0", "i2"),
-            ("f1", "i2"),
-            ("f2", "i2"),
-            ("a0", "i2"),
-            ("a1", "i2"),
-            ("a2", "i2"),
-            ("b0", "i2"),
-            ("b1", "i2"),
-            ("b2", "i2"),
-            ("gx", "f4"),
-            ("gy", "f4"),
-            ("gz", "f4"),
-            ("wx", "f4"),
-            ("wy", "f4"),
-            ("wz", "f4"),
-            ("Tx", "f4"),
-            ("Ty", "f4"),
-            ("Tz", "f4"),
-        ]
-    )
-
-
 # ── Records from firmware 0.13: every variant writes the block stream format ──
 # The internal SPI ICM-20948 (and any ICM-45686 / LSM6DSV320X) is in FIFO
 # blocks, so the records hold only the analog channels. (i2c_1 / i2c_2, with a
@@ -383,8 +304,6 @@ FIRMWARE_DTYPES = {
     "analog_18": dtype_analog_18,
     "analog_15": dtype_analog_15,
     "analog_12": dtype_analog_12,
-    "stream_2": dtype_stream_2,
-    "stream_1": dtype_stream_1,
     "i2c_2": dtype_i2c_2,
     "i2c_1": dtype_i2c_1,
     "i2c_1_legacy": dtype_i2c_1_legacy,
@@ -449,59 +368,6 @@ COLUMN_ORDERS = {
         "f0",
         "f1",
         "f2",
-    ],
-    "stream_2": [
-        "tmicros",
-        "t",
-        "a0",
-        "a1",
-        "a2",
-        "b0",
-        "b1",
-        "b2",
-        "d0",
-        "d1",
-        "d2",
-        "f0",
-        "f1",
-        "f2",
-        "gx",
-        "gy",
-        "gz",
-        "wx",
-        "wy",
-        "wz",
-        "Tx",
-        "Ty",
-        "Tz",
-    ],
-    "stream_1": [
-        "tmicros",
-        "t",
-        "a0",
-        "a1",
-        "a2",
-        "b0",
-        "b1",
-        "b2",
-        "d0",
-        "d1",
-        "d2",
-        "e0",
-        "e1",
-        "e2",
-        "f0",
-        "f1",
-        "f2",
-        "gx",
-        "gy",
-        "gz",
-        "wx",
-        "wy",
-        "wz",
-        "Tx",
-        "Ty",
-        "Tz",
     ],
     "i2c_2": [
         "tmicros",
