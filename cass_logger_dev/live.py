@@ -5,12 +5,17 @@ The host sends ``'k'`` on the command port and the device (firmware >= 0.12)
 replies on the data port with one snapshot frame::
 
     [0..1]   sync         0xA5 0x5A
-    [2]      frame_type   0x01 = SNAPSHOT (0.12), 0x02 = SNAPSHOT_IMU (0.13+)
-    [3]      flags        bit 0 LOGGING, bit 1 SENSOR_INIT_FAILED
+    [2]      frame_type   0x01 = SNAPSHOT (0.12), 0x02 = SNAPSHOT_IMU (0.13),
+                          0x03 = SNAPSHOT_PORTS (0.14+)
+    [3]      flags        bit 0 LOGGING, bit 1 SENSOR_INIT_FAILED,
+                          bit 2 PORT_WARNING, bit 3 IMU_FAILING (0.14+)
     [4..5]   payload_len  uint16 LE; payload bytes, or 0 while recording
     [6..]    payload      SNAPSHOT: raw datrec bytes
                           SNAPSHOT_IMU: uint16 record_len, raw datrec, uint8 n_imu,
                           n_imu × 52-byte IMU readings (see LIVE_IMU)
+                          SNAPSHOT_PORTS: uint16 record_len, raw datrec,
+                          uint32 analog_mask, 2 × 3-byte port info (C, E),
+                          uint8 n_imu, n_imu × 52-byte IMU readings
     [6+N..]  crc16        uint16 LE, CRC-16/CCITT-FALSE over bytes [2, 6+N)
 
 From firmware 0.13 the IMUs aren't in the datrec (they're read through their
@@ -18,6 +23,12 @@ FIFOs), so SNAPSHOT_IMU frames carry each FIFO IMU's current reading, in
 physical units. They're decoded into the same column names the datrec used:
 ``gx``/``wx``/``Tx`` for the internal IMU, ``gx_i2c_c``... / ``gx_i2c_e``... for
 ports C and E, plus ``hgx_i2c_c``... for the LSM6DSV320X's high-g accelerometer.
+
+From firmware 0.14 one firmware (``auto``) detects ports C and E at runtime,
+so its snapshots have every column a port could have: all 18 analog channels
+and an IMU (with high-g) on each port. Channels not in the frame's
+``analog_mask`` and IMUs that aren't there are NaN, and ``Snapshot.ports``
+says what is on each port.
 
 This module does no serial I/O, so it can be tested without hardware. The
 request/reply call lives in ``CassCommands.snapshot()``. Full spec:
@@ -36,13 +47,17 @@ from typing import Optional
 import numpy as np
 
 from .firmware_structs import FIRMWARE_DTYPES
+from .stream_format import PortInfo, masked_analog_fields, ports_from_bytes
 
 SYNC = b"\xA5\x5A"
 FRAME_SNAPSHOT = 0x01
 FRAME_SNAPSHOT_IMU = 0x02
-SNAPSHOT_FRAMES = (FRAME_SNAPSHOT, FRAME_SNAPSHOT_IMU)
+FRAME_SNAPSHOT_PORTS = 0x03
+SNAPSHOT_FRAMES = (FRAME_SNAPSHOT, FRAME_SNAPSHOT_IMU, FRAME_SNAPSHOT_PORTS)
 FLAG_LOGGING = 0x01
-FLAG_SENSOR_INIT_FAILED = 0x02
+FLAG_SENSOR_INIT_FAILED = 0x02  # 0.14+: a sensor fault now (logging refused); before: at boot
+FLAG_PORT_WARNING = 0x04        # 0.14+: a port IMU is running without its magnetometer
+FLAG_IMU_FAILING = 0x08         # 0.14+, with LOGGING: a port IMU stopped answering this recording
 MAX_PAYLOAD = 512
 MIN_LIVE_FW = (0, 12)
 
@@ -70,6 +85,9 @@ LIVE_FIFO_IMUS = {
     "i2c_45686_2":  [("S", False), ("C", False), ("E", False)],
     "i2c_320g":     [("S", False), ("C", True)],
     "i2c_320g_2":   [("S", False), ("C", True), ("E", True)],
+    # 0.14+: detected at runtime, so any port may have an IMU (high-g columns
+    # included in case it's an LSM6DSV320X).
+    "auto":         [("S", False), ("C", True), ("E", True)],
 }
 
 
@@ -113,6 +131,11 @@ class Snapshot:
     logging: bool
     sensor_init_failed: bool
     values: Optional[dict[str, int | float]] = None
+    # 0.14+ (SNAPSHOT_PORTS):
+    port_warning: bool = False   # a port IMU without its magnetometer
+    imu_failing: bool = False    # recording: a port IMU stopped answering
+    analog_mask: Optional[int] = None
+    ports: Optional[dict[str, PortInfo]] = None  # {"C": ..., "E": ...}; None while recording
 
 
 @dataclass
@@ -240,6 +263,60 @@ def _record_values(record: bytes, dt: np.dtype) -> dict[str, int | float]:
     return {name: rec[name].item() for name in dt.names if not name.startswith("_")}
 
 
+def _imu_readings(payload: bytes, start: int, fw_ver: str, values: dict) -> None:
+    """Adds ``fw_ver``'s IMU columns to ``values`` (NaN), then fills in the
+    n_imu readings at ``start`` (the n_imu byte)."""
+    n_imu = payload[start]
+    if len(payload) != start + 1 + n_imu * LIVE_IMU.size:
+        raise ValueError(f"Snapshot payload is {len(payload)} bytes; {n_imu} IMU readings don't fit")
+    for port, has_hg in _fifo_imus(fw_ver):
+        values.update({c: float("nan") for c in imu_columns(port, has_hg)})
+    for i in range(n_imu):
+        _, _, port, valid, *f = LIVE_IMU.unpack_from(payload, start + 1 + i * LIVE_IMU.size)
+        port = port.decode("ascii", errors="replace")
+        if port not in IMU_SUFFIX:
+            continue
+        s = IMU_SUFFIX[port]
+        groups = [("g", LIVE_IMU_ACCEL, f[0:3]), ("w", LIVE_IMU_GYRO, f[3:6]),
+                  ("T", LIVE_IMU_MAG, f[6:9]), ("hg", LIVE_IMU_HG, f[9:12])]
+        for name, bit, xyz in groups:
+            if valid & bit:
+                for axis, v in zip("xyz", xyz):
+                    values[f"{name}{axis}{s}"] = v
+
+
+PORTS_PART = struct.Struct("<I6s")  # analog_mask, port C and E info
+
+
+def decode_ports_payload(payload: bytes, fw_ver: str) -> tuple[dict[str, int | float], int, dict[str, PortInfo]]:
+    """Decode a SNAPSHOT_PORTS payload (0.14+) into ``({column: value},
+    analog_mask, ports)``. Analog channels not in the mask are NaN, as are the
+    columns of IMUs that aren't there.
+
+    Raises
+    ------
+    ValueError
+        If the payload is malformed, or its record length doesn't match a
+        layout of ``fw_ver``'s variant.
+    """
+    if len(payload) < 2:
+        raise ValueError("SNAPSHOT_PORTS payload too short")
+    record_len = struct.unpack_from("<H", payload, 0)[0]
+    end = 2 + record_len
+    if len(payload) < end + PORTS_PART.size + 1:
+        raise ValueError("SNAPSHOT_PORTS payload shorter than its record and port info")
+    try:
+        dt = _live_dtype(fw_ver, record_len)
+    except ValueError as exc:
+        raise ValueError(f"Variant mismatch: {exc}. Check the device's firmware variant.") from exc
+    values = _record_values(payload[2:end], dt)
+    mask, port_bytes = PORTS_PART.unpack_from(payload, end)
+    for name in masked_analog_fields(dt, mask):
+        values[name] = float("nan")
+    _imu_readings(payload, end + PORTS_PART.size, fw_ver, values)
+    return values, mask, ports_from_bytes(port_bytes)
+
+
 def decode_imu_payload(payload: bytes, fw_ver: str) -> dict[str, int | float]:
     """Decode a SNAPSHOT_IMU payload into ``{column: value}``: the datrec's
     fields, then every FIFO IMU's reading under ``live_columns()`` names.
@@ -267,20 +344,7 @@ def decode_imu_payload(payload: bytes, fw_ver: str) -> dict[str, int | float]:
     except ValueError as exc:
         raise ValueError(f"Variant mismatch: {exc}. Check the device's firmware variant.") from exc
     values = _record_values(payload[2:end], dt)
-    for port, has_hg in _fifo_imus(fw_ver):
-        values.update({c: float("nan") for c in imu_columns(port, has_hg)})
-    for i in range(n_imu):
-        _, _, port, valid, *f = LIVE_IMU.unpack_from(payload, end + 1 + i * LIVE_IMU.size)
-        port = port.decode("ascii", errors="replace")
-        if port not in IMU_SUFFIX:
-            continue
-        s = IMU_SUFFIX[port]
-        groups = [("g", LIVE_IMU_ACCEL, f[0:3]), ("w", LIVE_IMU_GYRO, f[3:6]),
-                  ("T", LIVE_IMU_MAG, f[6:9]), ("hg", LIVE_IMU_HG, f[9:12])]
-        for name, bit, xyz in groups:
-            if valid & bit:
-                for axis, v in zip("xyz", xyz):
-                    values[f"{name}{axis}{s}"] = v
+    _imu_readings(payload, end, fw_ver, values)
     return values
 
 
@@ -310,8 +374,11 @@ def decode_payload(payload: bytes, fw_ver: str) -> dict[str, int | float]:
 def decode_frame(frame: RawFrame, fw_ver: str, host_time: Optional[float] = None) -> Snapshot:
     """Turn a SNAPSHOT ``RawFrame`` into a ``Snapshot``."""
     logging = bool(frame.flags & FLAG_LOGGING)
+    mask = ports = None
     if logging:
         values = None
+    elif frame.frame_type == FRAME_SNAPSHOT_PORTS:
+        values, mask, ports = decode_ports_payload(frame.payload, fw_ver)
     elif frame.frame_type == FRAME_SNAPSHOT_IMU:
         values = decode_imu_payload(frame.payload, fw_ver)
     else:
@@ -321,6 +388,10 @@ def decode_frame(frame: RawFrame, fw_ver: str, host_time: Optional[float] = None
         logging=logging,
         sensor_init_failed=bool(frame.flags & FLAG_SENSOR_INIT_FAILED),
         values=values,
+        port_warning=bool(frame.flags & FLAG_PORT_WARNING),
+        imu_failing=bool(frame.flags & FLAG_IMU_FAILING),
+        analog_mask=mask,
+        ports=ports,
     )
 
 

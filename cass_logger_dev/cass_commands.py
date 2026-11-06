@@ -862,6 +862,9 @@ class CassCommands:
         "i2c_45686_2":  "analog_12",
         "i2c_320g":     "analog_15",
         "i2c_320g_2":   "analog_12",
+        # 0.14+: one firmware that detects ports C and E. Always all 18 analog
+        # fields; the stream FILE_HEADER's analog_mask says which are real.
+        "auto":         "analog_18",
     }
     STREAM_FROM_VERSION = (0, 13)
 

@@ -76,6 +76,8 @@ cass_utils = CassCommands()
 
 From firmware 0.13 every variant writes a stream of tagged blocks: the 500 Hz record is one block type, and each IMU's FIFO readings come in their own blocks with a time for every sample, at the IMU's own rate (internal ICM-20948 ~1.13 kHz, ICM-45686 ~819 Hz, LSM6DSV320X ~937 Hz). The spec is `docs/stream-format.md` in cass-logger-fw; the parser is `cass_logger_dev/stream_format.py`.
 
+From firmware 0.14 there is one firmware (`0.14-auto`) that detects what is on ports C and E (analog channels or an IMU). Its files (stream format v4) say what was found: `data.ports["C"]` / `data.ports["E"]` give each port's `state_name` (`"analog"`, `"imu"`, `"imu_no_mag"`), `device` and `i2c_addr`. The records only have the real analog channels, so with an IMU on port C there are no `c0`–`c2` columns, as with the 0.13 `i2c_320g` variant. 0.13 files (format v3) still parse; their `ports` is empty.
+
 ```python
 data = CassCommands.process_stream_file("LOG_1793290048.bin")
 data.records                 # 500 Hz analog channels
@@ -96,7 +98,7 @@ All times share the records' zero. How good a sample's time is: `t_edge` is True
 |-----------|--------|-------------|
 | Set RTC time | `cass_utils.set_RTC_time()` | Syncs the device RTC to the current UTC time |
 | Get RTC time | `cass_utils.get_RTC_time()` | Reads the current RTC time from the device |
-| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"0.13-std"`, `"0.13-i2c_45686"`, `"0.13-i2c_320g"`) |
+| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"0.14-auto"`; 0.13 had a variant per configuration: `"0.13-std"`, `"0.13-i2c_45686"`, `"0.13-i2c_320g"`) |
 | Get device ID | `cass_utils.get_device_ID()` | Reads the device identifier stored in EEPROM |
 | Set device ID | `cass_utils.put_device_ID(id)` | Writes a device identifier string to EEPROM |
 | Get RTC install time | `cass_utils.get_rtc_install_timestamp()` | Reads the RTC battery install timestamp from EEPROM |
@@ -107,7 +109,7 @@ All times share the records' zero. How good a sample's time is: `t_edge` is True
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError`. From 0.13 the IMU readings arrive alongside the record and are decoded into the same column names (`gx`…`Tz`, `gx_i2c_c`…); `live_columns(fw_ver)` lists them |
+| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError`. From 0.13 the IMU readings arrive alongside the record and are decoded into the same column names (`gx`…`Tz`, `gx_i2c_c`…); `live_columns(fw_ver)` lists them. From 0.14 (`auto`) the columns cover every channel a port could have; channels not on the device right now are NaN, and `Snapshot.ports`, `analog_mask`, `port_warning` (an IMU without its magnetometer) and `imu_failing` say what's there |
 
 Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-view-plan.md` for the spec.
 

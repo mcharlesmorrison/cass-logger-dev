@@ -15,6 +15,9 @@ from cass_logger_dev.stream_format import (
     BLOCK_SOURCE_INFO,
     DEVICE_ICM45686_MAG,
     DEVICE_LSM6DSV320X,
+    PORT_ANALOG,
+    PORT_IMU_NO_MAG,
+    PORT_IMU_OK,
     FIFO_ENTRY_T_EDGE,
     FIFO_ENTRY_T_FIT,
     SYNC,
@@ -41,10 +44,13 @@ def block(btype: int, source: int, payload: bytes) -> bytes:
     return bytes([SYNC, btype, source]) + struct.pack("<H", len(payload)) + payload
 
 
-def file_header(fw: str = FW, n_sources: int = 1, version: int = 3, device_id: str = "AB123") -> bytes:
+def file_header(fw: str = FW, n_sources: int = 1, version: int = 3, device_id: str = "AB123",
+                analog_mask: int = 0x3FFFF, ports=((PORT_ANALOG, 0, 0), (PORT_ANALOG, 0, 0))) -> bytes:
     rec_len = FIRMWARE_DTYPES[CassCommands.get_dtype_key(fw)]().itemsize
     payload = struct.pack("<4sH16s8sHHB", b"CASS", version, fw.encode(), device_id.encode(),
                           500, rec_len, n_sources)
+    if version >= 4:  # analog_mask, then port C and port E (state, device_type, i2c_addr)
+        payload += struct.pack("<I3B3B", analog_mask, *ports[0], *ports[1])
     return block(BLOCK_FILE_HEADER, 0, payload)
 
 
@@ -166,7 +172,7 @@ def test_device_id():
     assert read_stream(file_header(device_id="") + source_info() + tick(40000)).device_id == ""
 
 
-@pytest.mark.parametrize("version", [1, 2, 4])
+@pytest.mark.parametrize("version", [1, 2, 5])
 def test_other_format_versions_rejected(version):
     data = file_header(version=version) + source_info() + tick(40000)
     with pytest.raises(StreamFormatError, match=f"version {version}"):
@@ -343,3 +349,73 @@ def test_read_file_info(tmp_path):
     legacy = tmp_path / "LOG_3.bin"
     legacy.write_bytes(bytes(64))  # raw datrec structs, no header
     assert read_file_info(legacy) is None
+
+
+# ── Format v4 (firmware 0.14, one "auto" firmware) ───────────────────────────
+
+AUTO = "0.14-auto"
+MASK_C_IMU = 0x3FFFF & ~(0x7 << 9)  # everything but c0-c2 (bits 9-11)
+
+
+def v4_stream(*parts: bytes, analog_mask: int = MASK_C_IMU,
+              ports=((PORT_IMU_OK, DEVICE_LSM6DSV320X, 0x6B), (PORT_ANALOG, 0, 0))) -> bytes:
+    return (file_header(AUTO, version=4, analog_mask=analog_mask, ports=ports) + source_info()
+            + b"".join(parts))
+
+
+def test_auto_record_layout():
+    assert CassCommands.get_dtype_key(AUTO) == "analog_18"
+    assert FIRMWARE_DTYPES["analog_18"]().itemsize == 40
+
+
+def test_v4_header_mask_and_ports(tmp_path):
+    data = v4_stream(record(40000, AUTO, a0=7), record(42000, AUTO, a0=8))
+    s = read_stream(data)
+    assert s.format_version == 4 and s.record_len == 40 and not s.truncated
+    assert s.analog_mask == MASK_C_IMU
+    assert s.ports["C"].state == PORT_IMU_OK and s.ports["C"].i2c_addr == 0x6B
+    assert s.ports["C"].device == "LSM6DSV320X + QMC6309"
+    assert s.ports["E"].is_analog and s.ports["E"].device == ""
+
+    d = process_stream(data)
+    # Masked channels (port C, used by the IMU) are left out, as 0.13 i2c_320g did.
+    assert not {"c0", "c1", "c2"} & set(d.records.columns)
+    assert {"d0", "e0", "e2", "f0", "a0", "b2"} <= set(d.records.columns)
+    assert d.ports["C"].state == PORT_IMU_OK
+
+    path = tmp_path / "LOG.bin"
+    path.write_bytes(data)
+    info = read_file_info(path)
+    assert info.format_version == 4 and info.analog_mask == MASK_C_IMU and info.ports["E"].is_analog
+    # process_data_file gives the same record columns.
+    assert list(CassCommands.process_data_file(path).columns) == list(d.records.columns)
+
+
+def test_v4_all_analog_keeps_every_channel():
+    d = process_stream(v4_stream(record(40000, AUTO), analog_mask=0x3FFFF,
+                                 ports=((PORT_ANALOG, 0, 0), (PORT_ANALOG, 0, 0))))
+    assert {"c0", "c1", "c2", "e0", "e1", "e2"} <= set(d.records.columns)
+
+
+def test_v4_header_wrong_length_rejected():
+    # A v4 header must be 45 bytes; a 35-byte (v3-sized) one is unusable.
+    data = file_header(AUTO, version=3)
+    data = data[:5] + data[5:9] + struct.pack("<H", 4) + data[11:]
+    with pytest.raises(StreamFormatError, match="expected 45"):
+        read_stream(data + record(40000, AUTO))
+
+
+def test_v3_file_has_no_mask_or_ports():
+    s = read_stream(stream(tick(40000)))
+    assert s.format_version == 3 and s.analog_mask is None and s.ports == {}
+
+
+def test_lsm_without_mag_is_named_without_qmc():
+    no_mag = imu_source_info(1, DEVICE_LSM6DSV320X, b"C", 0x6B, 0x0B,  # accel, gyro, high-g
+                             [(960.0, 0.488), (960.0, 70.0), (960.0, 10.417)])
+    data = (file_header(AUTO, version=4, analog_mask=MASK_C_IMU,
+                        ports=((PORT_IMU_NO_MAG, DEVICE_LSM6DSV320X, 0x6B), (PORT_ANALOG, 0, 0)))
+            + no_mag + record(40000, AUTO))
+    s = read_stream(data)
+    assert s.sources[1].device == "LSM6DSV320X" and not s.sources[1].has_mag
+    assert s.ports["C"].state_name == "imu_no_mag" and s.ports["C"].device == "LSM6DSV320X"

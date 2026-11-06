@@ -1,7 +1,7 @@
 """
 Block stream file format: parsing and decoding.
 
-From firmware 0.13 every variant writes one file of tagged blocks instead of
+From firmware 0.13 the logger writes one file of tagged blocks instead of
 back-to-back datrec structs.
 Every block is a 5-byte header and a payload, all little-endian and packed::
 
@@ -15,7 +15,10 @@ then interleaves RECORD blocks (one datrec per 500 Hz tick) and FIFO blocks
 (every FIFO word an IMU produced, each with its own time). All times are
 ``filemicros`` (µs), the same clock as the datrec ``tmicros``.
 
-This parser reads format version 3, the first released version.
+This parser reads format versions 3 (firmware 0.13, the first released version)
+and 4 (0.14: one firmware that detects ports C and E; FILE_HEADER adds the
+analog channel mask and what was on each port, and the datrec is always the
+18-channel layout).
 
 This module does no serial I/O, so it can be tested without hardware. Full
 spec: ``docs/stream-format.md`` in cass-logger-fw.
@@ -35,7 +38,7 @@ from .firmware_structs import COLUMN_ORDERS, FIRMWARE_DTYPES
 
 SYNC = 0xA5
 MAGIC = b"CASS"
-FORMAT_VERSIONS = (3,)
+FORMAT_VERSIONS = (3, 4)
 
 BLOCK_FILE_HEADER = 0x01
 BLOCK_SOURCE_INFO = 0x02
@@ -45,6 +48,17 @@ KNOWN_BLOCKS = {BLOCK_FILE_HEADER, BLOCK_SOURCE_INFO, BLOCK_RECORD, BLOCK_FIFO}
 
 HEADER_LEN = 5
 FILE_HEADER = struct.Struct("<4sH16s8sHHB")  # magic, format_version, fw_version, device_id, record_rate_hz, record_len, n_sources
+# v4 appends: analog_mask, then (state, device_type, i2c_addr) for port C and port E.
+FILE_HEADER_V4_EXTRA = struct.Struct("<I3B3B")
+FILE_HEADER_SIZES = {3: FILE_HEADER.size, 4: FILE_HEADER.size + FILE_HEADER_V4_EXTRA.size}  # 35, 45
+FILE_HEADER_MAX = max(FILE_HEADER_SIZES.values())
+
+# Port states (StreamPortInfo.state, v4+).
+PORT_ANALOG = 0      # 3 analog channels in the datrec
+PORT_IMU_OK = 1      # an IMU, with its magnetometer if it has one
+PORT_IMU_NO_MAG = 2  # an IMU whose expected magnetometer didn't answer: recorded 6-DoF
+PORT_FAULT = 3       # an I2C device the logger doesn't know, or an IMU that failed to set up
+PORT_STATE_NAMES = {PORT_ANALOG: "analog", PORT_IMU_OK: "imu", PORT_IMU_NO_MAG: "imu_no_mag", PORT_FAULT: "fault"}
 
 # FIFO block header: flags, entry count, read time.
 FIFO_HEADER = struct.Struct("<BBI")
@@ -76,8 +90,17 @@ DEVICE_NAMES = {
     DEVICE_ICM20948: "ICM-20948",
     DEVICE_ICM45686: "ICM-45686",
     DEVICE_ICM45686_MAG: "ICM-45686 + QMC6309",
-    DEVICE_LSM6DSV320X: "LSM6DSV320X + QMC6309",
+    DEVICE_LSM6DSV320X: "LSM6DSV320X",  # + " + QMC6309" when it has its magnetometer
 }
+
+
+def device_name(device_type: int, has_mag: bool = True) -> str:
+    """A part's display name. The LSM6DSV320X's QMC6309 is named only when
+    present (the ICM-45686's has its own device type)."""
+    name = DEVICE_NAMES.get(device_type, f"device {device_type}")
+    if device_type == DEVICE_LSM6DSV320X and has_mag:
+        name += " + QMC6309"
+    return name
 
 # Sensor codes (tag >> 3), the same for every source (the LSM6DSV320X's own FIFO tags).
 TAG_GYRO = 0x01
@@ -133,7 +156,7 @@ class SourceInfo:
 
     @property
     def device(self) -> str:
-        return DEVICE_NAMES.get(self.device_type, f"device {self.device_type}")
+        return device_name(self.device_type, self.has_mag)
 
     @property
     def is_imu(self) -> bool:
@@ -142,6 +165,35 @@ class SourceInfo:
     @property
     def has_mag(self) -> bool:
         return bool(self.sensors & IMU_MAG)
+
+
+@dataclass
+class PortInfo:
+    """What was on port C or E (FILE_HEADER v4+, live view 0.14+)."""
+
+    state: int          # PORT_*
+    device_type: int    # DEVICE_*, 0 if no IMU was identified
+    i2c_addr: int       # 7-bit address of the device found, 0 if none
+
+    @property
+    def state_name(self) -> str:
+        return PORT_STATE_NAMES.get(self.state, f"state {self.state}")
+
+    @property
+    def is_analog(self) -> bool:
+        return self.state == PORT_ANALOG
+
+    @property
+    def device(self) -> str:
+        """The IMU's name, or "" if there is none."""
+        if not self.device_type:
+            return ""
+        return device_name(self.device_type, has_mag=self.state != PORT_IMU_NO_MAG)
+
+
+def ports_from_bytes(raw: bytes) -> dict[str, PortInfo]:
+    """Two StreamPortInfo (port C, then port E) as {"C": ..., "E": ...}."""
+    return {port: PortInfo(*raw[3 * i : 3 * i + 3]) for i, port in enumerate("CE")}
 
 
 def _parse_source_info(buf: bytes, p: int, length: int, src: int) -> Optional[SourceInfo]:
@@ -201,6 +253,8 @@ class StreamFile:
     device_id: str = ""       # "" if the logger's ID wasn't set
     truncated: bool = False   # the last block ran past the end of the file
     skipped_bytes: int = 0    # bytes dropped while resyncing after corruption
+    analog_mask: Optional[int] = None  # v4+: bit n set = datrec field a<n> is a real channel
+    ports: dict[str, PortInfo] = field(default_factory=dict)  # v4+: "C", "E"
 
 
 @dataclass
@@ -234,6 +288,8 @@ class StreamData:
 
     ``records`` is the same DataFrame ``CassCommands.process_data_file``
     returns. ``imu`` maps port letter ("C", "E") to that IMU's data.
+    ``ports`` (firmware 0.14+) says what was on ports C and E; it's empty
+    for older files, where the variant in ``fw_version`` says.
     """
 
     fw_version: str
@@ -242,6 +298,7 @@ class StreamData:
     device_id: str = ""       # "" for legacy files and loggers with no ID set
     truncated: bool = False
     skipped_bytes: int = 0
+    ports: dict[str, PortInfo] = field(default_factory=dict)
 
 
 def is_stream_file(path: Union[str, Path]) -> bool:
@@ -268,7 +325,7 @@ def _record_dtype(fw_version: str, record_len: Optional[int] = None) -> tuple[np
     return FIRMWARE_DTYPES[key]().newbyteorder("<"), COLUMN_ORDERS[key]
 
 
-def _block_ok(buf: bytes, i: int, btype: int, length: int, record_len: int) -> bool:
+def _block_ok(buf: bytes, i: int, btype: int, length: int, record_len: int, header_len: int) -> bool:
     """Checks a block's length against what its type allows."""
     if btype == BLOCK_RECORD:
         return length == record_len
@@ -276,7 +333,7 @@ def _block_ok(buf: bytes, i: int, btype: int, length: int, record_len: int) -> b
         return (length >= FIFO_HEADER.size
                 and length == FIFO_HEADER.size + FIFO_ENTRY_DTYPE.itemsize * buf[i + HEADER_LEN + 1])
     if btype == BLOCK_FILE_HEADER:
-        return length == FILE_HEADER.size
+        return length == header_len
     return length >= 1  # SOURCE_INFO: device-specific
 
 
@@ -289,6 +346,12 @@ class FileInfo:
     format_version: int
     record_rate_hz: int
     record_len: int
+    analog_mask: Optional[int] = None  # v4+
+    ports: dict[str, PortInfo] = field(default_factory=dict)  # v4+
+
+    @property
+    def header_len(self) -> int:
+        return FILE_HEADER_SIZES[self.format_version]
 
 
 def _parse_file_header(buf: bytes) -> FileInfo:
@@ -296,19 +359,28 @@ def _parse_file_header(buf: bytes) -> FileInfo:
     if not _is_stream_header(buf):
         raise StreamFormatError("Not a block stream file (no FILE_HEADER at the start)")
     hdr_len = struct.unpack_from("<H", buf, 3)[0]
-    if hdr_len != FILE_HEADER.size or len(buf) < HEADER_LEN + FILE_HEADER.size:
-        raise StreamFormatError(f"FILE_HEADER is cut short or the wrong length ({hdr_len} bytes, "
-                                f"expected {FILE_HEADER.size})")
-    _magic, fmt, fw, dev, rate, record_len, _n_sources = FILE_HEADER.unpack_from(buf, HEADER_LEN)
+    if len(buf) < HEADER_LEN + 6:
+        raise StreamFormatError("FILE_HEADER is cut short")
+    fmt = struct.unpack_from("<H", buf, HEADER_LEN + 4)[0]
     if fmt not in FORMAT_VERSIONS:
         raise StreamFormatError(f"Unsupported stream format version {fmt} (parser knows {FORMAT_VERSIONS})")
-    return FileInfo(
+    expected = FILE_HEADER_SIZES[fmt]
+    if hdr_len != expected or len(buf) < HEADER_LEN + expected:
+        raise StreamFormatError(f"FILE_HEADER is cut short or the wrong length ({hdr_len} bytes, "
+                                f"expected {expected} for format version {fmt})")
+    _magic, _fmt, fw, dev, rate, record_len, _n_sources = FILE_HEADER.unpack_from(buf, HEADER_LEN)
+    info = FileInfo(
         fw_version=fw.split(b"\0", 1)[0].decode("ascii", errors="replace"),
         device_id=dev.split(b"\0", 1)[0].decode("ascii", errors="replace"),
         format_version=fmt,
         record_rate_hz=rate,
         record_len=record_len,
     )
+    if fmt >= 4:
+        mask, *port_bytes = FILE_HEADER_V4_EXTRA.unpack_from(buf, HEADER_LEN + FILE_HEADER.size)
+        info.analog_mask = mask
+        info.ports = ports_from_bytes(bytes(port_bytes))
+    return info
 
 
 def read_file_info(path: Union[str, Path]) -> Optional[FileInfo]:
@@ -323,7 +395,7 @@ def read_file_info(path: Union[str, Path]) -> Optional[FileInfo]:
         If the header is unusable (see ``read_stream``).
     """
     with open(path, "rb") as f:
-        head = f.read(HEADER_LEN + FILE_HEADER.size)
+        head = f.read(HEADER_LEN + FILE_HEADER_MAX)
     if not _is_stream_header(head):
         return None
     return _parse_file_header(head)
@@ -382,7 +454,7 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
             if end > n:
                 if past_end_skipped is None:
                     past_end_skipped = skipped
-            elif _block_ok(buf, i, btype, length, record_len):
+            elif _block_ok(buf, i, btype, length, record_len, info.header_len):
                 past_end_skipped = None
                 src = buf[i + 2]
                 p = i + HEADER_LEN
@@ -395,9 +467,9 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
                         fifo_slices.setdefault(src, []).append(mv[first : first + count * entry_len])
                     blocks.setdefault(src, []).append((len(record_slices), flags, read_us, count))
                 elif btype == BLOCK_SOURCE_INFO:
-                    info = _parse_source_info(buf, p, length, src)
-                    if info is not None:
-                        sources[src] = info
+                    src_info = _parse_source_info(buf, p, length, src)
+                    if src_info is not None:
+                        sources[src] = src_info
                 i = end
                 continue
         # Not a valid block here: resync at the next sync byte.
@@ -420,7 +492,7 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
         for src, slices in fifo_slices.items()
     }
     return StreamFile(fw_version, fmt, rate, record_len, sources, records, fifo, blocks,
-                      device_id, truncated, skipped)
+                      device_id, truncated, skipped, info.analog_mask, info.ports)
 
 
 def unwrap_u32(values: np.ndarray) -> np.ndarray:
@@ -495,14 +567,29 @@ def decode_imu(entries: np.ndarray, info: SourceInfo, t0: int,
     )
 
 
+def masked_analog_fields(dtype: np.dtype, analog_mask: Optional[int]) -> list[str]:
+    """The datrec fields ``analog_mask`` marks as not real (empty if there's no
+    mask). Bit n is the n-th analog field after ``tmicros`` (Teensy pin An)."""
+    if analog_mask is None:
+        return []
+    fields = [n for n in dtype.names if n != "tmicros" and not n.startswith("_")]
+    return [name for bit, name in enumerate(fields) if not analog_mask >> bit & 1]
+
+
 def records_frame(stream: StreamFile) -> tuple[pd.DataFrame, int]:
     """The RECORD blocks as a DataFrame, plus the raw tmicros used as zero.
 
     Same columns and ``t`` as ``CassCommands.process_data_file`` gives for the
     legacy format, but with tmicros properly unwrapped across the 32-bit wrap.
+
+    From format v4 the record always has all 18 analog fields; the ones not in
+    ``analog_mask`` (a port with an I2C device) are left out, so the columns
+    match what 0.13 gave for the same ports (e.g. no ``c0``-``c2`` with an IMU
+    on port C).
     """
     _, column_order = _record_dtype(stream.fw_version, stream.record_len)
     df = pd.DataFrame(stream.records)
+    df = df.drop(columns=masked_analog_fields(stream.records.dtype, stream.analog_mask))
     tmicros = unwrap_u32(stream.records["tmicros"])
     t0 = int(tmicros[0]) if len(tmicros) else 0
     df["tmicros"] = tmicros - t0
@@ -520,7 +607,8 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
     records, t0 = records_frame(stream)
 
     data = StreamData(stream.fw_version, records, device_id=stream.device_id,
-                      truncated=stream.truncated, skipped_bytes=stream.skipped_bytes)
+                      truncated=stream.truncated, skipped_bytes=stream.skipped_bytes,
+                      ports=stream.ports)
     for src, info in stream.sources.items():
         if not info.is_imu:
             continue  # a kind this parser can't decode yet
