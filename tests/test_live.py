@@ -311,10 +311,10 @@ AUTO = "0.14-auto"
 
 
 def make_ports_payload(mask: int, ports, imus: list, seed: int = 1,
-                       imu_on_analog: int = 0) -> tuple[bytes, np.ndarray]:
+                       imu_on_analog: int = 0, pullup_mask: int = 0) -> tuple[bytes, np.ndarray]:
     record, rec = make_payload(AUTO, seed)
-    body = struct.pack("<H", len(record)) + record + struct.pack("<I3B3BB", mask, *ports[0], *ports[1],
-                                                                 imu_on_analog)
+    body = struct.pack("<H", len(record)) + record + struct.pack("<II3B3BB", mask, pullup_mask, *ports[0],
+                                                                 *ports[1], imu_on_analog)
     body += bytes([len(imus)])
     for port, valid, values in imus:
         body += LIVE_IMU.pack(3 if port == "S" else 1, 4, port.encode(), valid, *values)
@@ -326,7 +326,7 @@ def test_snapshot_ports_frame():
     ports = ((PORT_IMU_OK, 4, 0x6B), (PORT_ANALOG, 0, 0))
     vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
     payload, rec = make_ports_payload(mask, ports, [("C", LIVE_IMU_ACCEL | LIVE_IMU_HG, vals)])
-    assert len(payload) == 2 + 40 + 4 + 6 + 1 + 1 + 52  # as the firmware sends it
+    assert len(payload) == 2 + 40 + 4 + 4 + 6 + 1 + 1 + 52  # as the firmware sends it
     frame = FrameParser().feed(make_frame(payload, frame_type=FRAME_SNAPSHOT_PORTS))[0]
     snap = decode_frame(frame, AUTO)
     assert list(snap.values) == live_columns(AUTO)
@@ -334,7 +334,7 @@ def test_snapshot_ports_frame():
     assert all(np.isnan(snap.values[c]) for c in ("c0", "c1", "c2"))  # not real channels
     assert snap.values["gx_i2c_c"] == 1.0 and snap.values["hgz_i2c_c"] == 12.0
     assert np.isnan(snap.values["wx_i2c_c"]) and np.isnan(snap.values["gx_i2c_e"])
-    assert snap.analog_mask == mask
+    assert snap.analog_mask == mask and snap.pullup_mask == 0
     assert snap.ports["C"].device == "LSM6DSV320X + QMC6309" and snap.ports["E"].is_analog
     assert not (snap.port_warning or snap.imu_failing or snap.sensor_init_failed)
     assert snap.imu_on_analog == []
@@ -342,10 +342,11 @@ def test_snapshot_ports_frame():
 
 def test_snapshot_ports_imu_on_analog_port():
     ports = ((PORT_ANALOG, 0, 0), (PORT_ANALOG, 0, 0))
-    payload, _ = make_ports_payload(0x3FFFF, ports, [], imu_on_analog=0b100001)  # A and F
+    payload, _ = make_ports_payload(0x3FFFF, ports, [], imu_on_analog=0b100001,  # A and F
+                                    pullup_mask=0x38)
     snap = decode_frame(FrameParser().feed(
         make_frame(payload, flags=FLAG_SENSOR_INIT_FAILED, frame_type=FRAME_SNAPSHOT_PORTS))[0], AUTO)
-    assert snap.sensor_init_failed and snap.imu_on_analog == ["A", "F"]
+    assert snap.sensor_init_failed and snap.imu_on_analog == ["A", "F"] and snap.pullup_mask == 0x38
 
 
 def test_snapshot_ports_flags():

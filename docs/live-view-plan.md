@@ -86,13 +86,14 @@ The SNAPSHOT_IMU payload with what is on ports C and E between the record and th
 | 0 | 2 | `record_len` | `uint16`, `sizeof(datrec)`: 40 (all 18 channels) |
 | 2 | `record_len` | `record` | raw `datrec` bytes, the 18-channel layout (`dtype_analog_18`) |
 | 2+R | 4 | `analog_mask` | `uint32`, bit *n* set: field `a`*n* is a real analog channel; the fields of a port with an I2C device are 0. As in the stream format's `FILE_HEADER` |
-| 6+R | 3 | `port_c` | `state`, `device_type`, `i2c_addr` (`StreamPortInfo`, `docs/stream-format.md`): 0 analog, 1 IMU, 2 IMU without its magnetometer, 3 fault, 4 IMU wired for the other port (a fault too) |
-| 9+R | 3 | `port_e` | the same for port E |
-| 12+R | 1 | `imu_on_analog` | bit *n* set: an I2C IMU is plugged into analog-only port `'A'` + *n* (A, B, D or F; the C and E bits are 0). A fault: `SENSOR_INIT_FAILED` is set |
-| 13+R | 1 | `n_imu` | readings that follow (one per running FIFO IMU, at most 3) |
-| 14+R | 52 × `n_imu` | readings | as in SNAPSHOT_IMU, below |
+| 6+R | 4 | `pullup_mask` | `uint32`, bit *n* set: channel `a`*n* has the logger's internal 22 kΩ pull-up on. As in `FILE_HEADER` (0.14: port E's channels while it is analog) |
+| 10+R | 3 | `port_c` | `state`, `device_type`, `i2c_addr` (`StreamPortInfo`, `docs/stream-format.md`): 0 analog, 1 IMU, 2 IMU without its magnetometer, 3 fault, 4 IMU wired for the other port (a fault too) |
+| 13+R | 3 | `port_e` | the same for port E |
+| 16+R | 1 | `imu_on_analog` | bit *n* set: an I2C IMU is plugged into analog-only port `'A'` + *n* (A, B, D or F; the C and E bits are 0). A fault: `SENSOR_INIT_FAILED` is set |
+| 17+R | 1 | `n_imu` | readings that follow (one per running FIFO IMU, at most 3) |
+| 18+R | 52 × `n_imu` | readings | as in SNAPSHOT_IMU, below |
 
-A port can change between snapshots (the logger re-checks ports with an I2C device every 2 s while idle), so read `analog_mask` and the port fields from every frame. A port that was analog at boot isn't probed again: sensors are only changed with the logger off. An IMU on an analog-only port is only looked for at boot.
+A port can change between snapshots (the logger re-checks ports with an I2C device every 2 s while idle), so read `analog_mask`, `pullup_mask` and the port fields from every frame. A port that was analog at boot isn't probed again: sensors are only changed with the logger off. An IMU on an analog-only port is only looked for at boot.
 
 ### SNAPSHOT_IMU payload (firmware 0.13)
 

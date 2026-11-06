@@ -48,9 +48,10 @@ KNOWN_BLOCKS = {BLOCK_FILE_HEADER, BLOCK_SOURCE_INFO, BLOCK_RECORD, BLOCK_FIFO}
 
 HEADER_LEN = 5
 FILE_HEADER = struct.Struct("<4sH16s8sHHB")  # magic, format_version, fw_version, device_id, record_rate_hz, record_len, n_sources
-# v4 appends: analog_mask, then (state, device_type, i2c_addr) for port C and port E.
-FILE_HEADER_V4_EXTRA = struct.Struct("<I3B3B")
-FILE_HEADER_SIZES = {3: FILE_HEADER.size, 4: FILE_HEADER.size + FILE_HEADER_V4_EXTRA.size}  # 35, 45
+# v4 appends: analog_mask, pullup_mask, then (state, device_type, i2c_addr) for
+# port C and port E.
+FILE_HEADER_V4_EXTRA = struct.Struct("<II3B3B")
+FILE_HEADER_SIZES = {3: FILE_HEADER.size, 4: FILE_HEADER.size + FILE_HEADER_V4_EXTRA.size}  # 35, 49
 FILE_HEADER_MAX = max(FILE_HEADER_SIZES.values())
 
 # Port states (StreamPortInfo.state, v4+).
@@ -256,6 +257,7 @@ class StreamFile:
     truncated: bool = False   # the last block ran past the end of the file
     skipped_bytes: int = 0    # bytes dropped while resyncing after corruption
     analog_mask: Optional[int] = None  # v4+: bit n set = datrec field a<n> is a real channel
+    pullup_mask: Optional[int] = None  # v4+: bit n set = channel a<n> had the 22k pull-up on
     ports: dict[str, PortInfo] = field(default_factory=dict)  # v4+: "C", "E"
 
 
@@ -301,6 +303,7 @@ class StreamData:
     truncated: bool = False
     skipped_bytes: int = 0
     ports: dict[str, PortInfo] = field(default_factory=dict)
+    pullup_mask: Optional[int] = None  # 0.14+: bit n set = channel a<n> had the 22k pull-up on
 
 
 def is_stream_file(path: Union[str, Path]) -> bool:
@@ -349,6 +352,7 @@ class FileInfo:
     record_rate_hz: int
     record_len: int
     analog_mask: Optional[int] = None  # v4+
+    pullup_mask: Optional[int] = None  # v4+
     ports: dict[str, PortInfo] = field(default_factory=dict)  # v4+
 
     @property
@@ -379,8 +383,9 @@ def _parse_file_header(buf: bytes) -> FileInfo:
         record_len=record_len,
     )
     if fmt >= 4:
-        mask, *port_bytes = FILE_HEADER_V4_EXTRA.unpack_from(buf, HEADER_LEN + FILE_HEADER.size)
+        mask, pullups, *port_bytes = FILE_HEADER_V4_EXTRA.unpack_from(buf, HEADER_LEN + FILE_HEADER.size)
         info.analog_mask = mask
+        info.pullup_mask = pullups
         info.ports = ports_from_bytes(bytes(port_bytes))
     return info
 
@@ -494,7 +499,8 @@ def read_stream(source: Union[str, Path, bytes]) -> StreamFile:
         for src, slices in fifo_slices.items()
     }
     return StreamFile(fw_version, fmt, rate, record_len, sources, records, fifo, blocks,
-                      device_id, truncated, skipped, info.analog_mask, info.ports)
+                      device_id, truncated, skipped, analog_mask=info.analog_mask,
+                      pullup_mask=info.pullup_mask, ports=info.ports)
 
 
 def unwrap_u32(values: np.ndarray) -> np.ndarray:
@@ -610,7 +616,7 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
 
     data = StreamData(stream.fw_version, records, device_id=stream.device_id,
                       truncated=stream.truncated, skipped_bytes=stream.skipped_bytes,
-                      ports=stream.ports)
+                      ports=stream.ports, pullup_mask=stream.pullup_mask)
     for src, info in stream.sources.items():
         if not info.is_imu:
             continue  # a kind this parser can't decode yet

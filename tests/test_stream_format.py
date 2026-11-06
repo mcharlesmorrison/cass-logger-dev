@@ -47,12 +47,13 @@ def block(btype: int, source: int, payload: bytes) -> bytes:
 
 
 def file_header(fw: str = FW, n_sources: int = 1, version: int = 3, device_id: str = "AB123",
-                analog_mask: int = 0x3FFFF, ports=((PORT_ANALOG, 0, 0), (PORT_ANALOG, 0, 0))) -> bytes:
+                analog_mask: int = 0x3FFFF, ports=((PORT_ANALOG, 0, 0), (PORT_ANALOG, 0, 0)),
+                pullup_mask: int = 0) -> bytes:
     rec_len = FIRMWARE_DTYPES[CassCommands.get_dtype_key(fw)]().itemsize
     payload = struct.pack("<4sH16s8sHHB", b"CASS", version, fw.encode(), device_id.encode(),
                           500, rec_len, n_sources)
-    if version >= 4:  # analog_mask, then port C and port E (state, device_type, i2c_addr)
-        payload += struct.pack("<I3B3B", analog_mask, *ports[0], *ports[1])
+    if version >= 4:  # analog_mask, pullup_mask, then port C and E (state, device_type, i2c_addr)
+        payload += struct.pack("<II3B3B", analog_mask, pullup_mask, *ports[0], *ports[1])
     return block(BLOCK_FILE_HEADER, 0, payload)
 
 
@@ -359,9 +360,10 @@ AUTO = "0.14-auto"
 MASK_C_IMU = 0x3FFFF & ~(0x7 << 9)  # everything but c0-c2 (bits 9-11)
 
 
-def v4_stream(*parts: bytes, analog_mask: int = MASK_C_IMU,
+def v4_stream(*parts: bytes, analog_mask: int = MASK_C_IMU, pullup_mask: int = 0x38,
               ports=((PORT_IMU_OK, DEVICE_LSM6DSV320X, 0x6B), (PORT_ANALOG, 0, 0))) -> bytes:
-    return (file_header(AUTO, version=4, analog_mask=analog_mask, ports=ports) + source_info()
+    return (file_header(AUTO, version=4, analog_mask=analog_mask, ports=ports, pullup_mask=pullup_mask)
+            + source_info()
             + b"".join(parts))
 
 
@@ -374,7 +376,7 @@ def test_v4_header_mask_and_ports(tmp_path):
     data = v4_stream(record(40000, AUTO, a0=7), record(42000, AUTO, a0=8))
     s = read_stream(data)
     assert s.format_version == 4 and s.record_len == 40 and not s.truncated
-    assert s.analog_mask == MASK_C_IMU
+    assert s.analog_mask == MASK_C_IMU and s.pullup_mask == 0x38  # E0-E2: switches
     assert s.ports["C"].state == PORT_IMU_OK and s.ports["C"].i2c_addr == 0x6B
     assert s.ports["C"].device == "LSM6DSV320X + QMC6309"
     assert s.ports["E"].is_analog and s.ports["E"].device == ""
@@ -383,12 +385,13 @@ def test_v4_header_mask_and_ports(tmp_path):
     # Masked channels (port C, used by the IMU) are left out, as 0.13 i2c_320g did.
     assert not {"c0", "c1", "c2"} & set(d.records.columns)
     assert {"d0", "e0", "e2", "f0", "a0", "b2"} <= set(d.records.columns)
-    assert d.ports["C"].state == PORT_IMU_OK
+    assert d.ports["C"].state == PORT_IMU_OK and d.pullup_mask == 0x38
 
     path = tmp_path / "LOG.bin"
     path.write_bytes(data)
     info = read_file_info(path)
     assert info.format_version == 4 and info.analog_mask == MASK_C_IMU and info.ports["E"].is_analog
+    assert info.pullup_mask == 0x38
     # process_data_file gives the same record columns.
     assert list(CassCommands.process_data_file(path).columns) == list(d.records.columns)
 
@@ -400,10 +403,10 @@ def test_v4_all_analog_keeps_every_channel():
 
 
 def test_v4_header_wrong_length_rejected():
-    # A v4 header must be 45 bytes; a 35-byte (v3-sized) one is unusable.
+    # A v4 header must be 49 bytes; a 35-byte (v3-sized) one is unusable.
     data = file_header(AUTO, version=3)
     data = data[:5] + data[5:9] + struct.pack("<H", 4) + data[11:]
-    with pytest.raises(StreamFormatError, match="expected 45"):
+    with pytest.raises(StreamFormatError, match="expected 49"):
         read_stream(data + record(40000, AUTO))
 
 
