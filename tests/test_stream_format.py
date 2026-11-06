@@ -17,6 +17,8 @@ from cass_logger_dev.stream_format import (
     DEVICE_LSM6DSV320X,
     PORT_ANALOG,
     PORT_IMU_NO_MAG,
+    PORT_WRONG_PORT,
+    ports_from_bytes,
     PORT_IMU_OK,
     FIFO_ENTRY_T_EDGE,
     FIFO_ENTRY_T_FIT,
@@ -419,3 +421,9 @@ def test_lsm_without_mag_is_named_without_qmc():
     s = read_stream(data)
     assert s.sources[1].device == "LSM6DSV320X" and not s.sources[1].has_mag
     assert s.ports["C"].state_name == "imu_no_mag" and s.ports["C"].device == "LSM6DSV320X"
+
+
+def test_wrong_port_state():
+    p = ports_from_bytes(bytes([PORT_WRONG_PORT, DEVICE_LSM6DSV320X, 0x6A, PORT_ANALOG, 0, 0]))
+    assert p["C"].state_name == "wrong_port" and p["C"].device == "LSM6DSV320X + QMC6309"
+    assert p["C"].i2c_addr == 0x6A and not p["C"].is_analog and p["E"].is_analog
