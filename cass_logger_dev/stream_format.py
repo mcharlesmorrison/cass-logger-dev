@@ -60,8 +60,9 @@ PORT_IMU_OK = 1      # an IMU, with its magnetometer if it has one
 PORT_IMU_NO_MAG = 2  # an IMU whose expected magnetometer didn't answer: recorded 6-DoF
 PORT_FAULT = 3       # an I2C device the logger doesn't know, or an IMU that failed to set up
 PORT_WRONG_PORT = 4  # an IMU wired for the other port (SDA/SCL swapped): a fault too
+PORT_IMU_LOST = 5    # an IMU found earlier no longer answers (unplugged/broken cable): a fault too
 PORT_STATE_NAMES = {PORT_ANALOG: "analog", PORT_IMU_OK: "imu", PORT_IMU_NO_MAG: "imu_no_mag", PORT_FAULT: "fault",
-                    PORT_WRONG_PORT: "wrong_port"}
+                    PORT_WRONG_PORT: "wrong_port", PORT_IMU_LOST: "imu_lost"}
 
 # FIFO block header: flags, entry count, read time.
 FIFO_HEADER = struct.Struct("<BBI")

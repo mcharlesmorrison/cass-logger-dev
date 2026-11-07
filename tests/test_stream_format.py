@@ -18,6 +18,7 @@ from cass_logger_dev.stream_format import (
     PORT_ANALOG,
     PORT_IMU_NO_MAG,
     PORT_WRONG_PORT,
+    PORT_IMU_LOST,
     ports_from_bytes,
     PORT_IMU_OK,
     FIFO_ENTRY_T_EDGE,
@@ -430,3 +431,9 @@ def test_wrong_port_state():
     p = ports_from_bytes(bytes([PORT_WRONG_PORT, DEVICE_LSM6DSV320X, 0x6A, PORT_ANALOG, 0, 0]))
     assert p["C"].state_name == "wrong_port" and p["C"].device == "LSM6DSV320X + QMC6309"
     assert p["C"].i2c_addr == 0x6A and not p["C"].is_analog and p["E"].is_analog
+
+
+def test_imu_lost_state():
+    p = ports_from_bytes(bytes([PORT_ANALOG, 0, 0, PORT_IMU_LOST, DEVICE_LSM6DSV320X, 0x6A]))
+    assert p["E"].state_name == "imu_lost" and p["E"].device == "LSM6DSV320X + QMC6309"
+    assert not p["E"].is_analog
