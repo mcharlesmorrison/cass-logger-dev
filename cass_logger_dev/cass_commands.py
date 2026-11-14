@@ -420,12 +420,9 @@ class CassCommands:
         filename_term = bytes(filename_term, "utf-8")
 
         sd_buff_size = 5120
-        num_buffs = file_size / sd_buff_size
-        fractional_buffs = num_buffs - int(num_buffs)
-        # TODO: add fractional buffer transfer at end
-        if file_size % sd_buff_size != 0:
-            num_buffs = file_size // sd_buff_size  # skip last incomplete sd_buffer
-        num_buffs = int(num_buffs)
+        # The device sends a whole buffer per 't', padded past the end of the
+        # file, so the last partial buffer is requested too and trimmed below.
+        num_buffs = -(-file_size // sd_buff_size)  # ceil
         bytes_received = []
 
         self.ser_command.write(b"o")  # open target file
@@ -478,9 +475,9 @@ class CassCommands:
             sd_byte_idx = 0
 
         # DEBUG
-        expected_byte_number = num_buffs * sd_buff_size
-        number_buffs_off = expected_byte_number - len(bytes_received)
+        number_buffs_off = num_buffs * sd_buff_size - len(bytes_received)
         print(f"Number of bytes short = {number_buffs_off} ({filename})")
+        bytes_received = bytes_received[:file_size]  # drop the last buffer's padding
 
         self.ser_command.write(b"c")  # close target file
         self._close_serial()
