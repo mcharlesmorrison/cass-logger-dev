@@ -1,5 +1,5 @@
 """
-Example: Load a block stream file (LSM6DSV320X variants) and plot its IMU data.
+Example: Load a block stream file (firmware 0.14-auto) and plot the LSM6DSV320X's data.
 
 Workflow
 --------
@@ -12,9 +12,11 @@ Data used
 ---------
 ``process_stream_file`` returns a ``StreamData``:
 
-- ``records`` : the 500 Hz record DataFrame (analog channels and the internal
-  SPI IMU), the same as ``process_data_file`` returns.
-- ``imu["C"]`` (and ``imu["E"]`` on ``i2c_320g_2``) : one LSM6DSV320X, as
+- ``records`` : the 500 Hz analog channels, the same as ``process_data_file``
+  returns.
+- ``ports`` : what was on ports C and E. In the example file, an ICM-45686 on
+  port C and an LSM6DSV320X on port E.
+- ``imu["S"]`` (internal ICM-20948), ``imu["C"]``, ``imu["E"]`` : each IMU as
   DataFrames ``accel_hg`` (high-g) / ``accel`` (low-g) [mg], ``gyro`` [dps],
   ``mag`` [µT] and ``timestamp``, each with ``t`` (s), ``tmicros``, ``t_edge``
   and ``t_fit``.
@@ -45,7 +47,7 @@ from cass_logger_dev.stream_format import StreamData
 
 def import_data() -> StreamData:
     """Load and parse the example block stream file."""
-    filepath = Path(__file__).parent / "data" / "lsm6dsv320x-test_i2c_320g" / "LOG_1793206549.bin"
+    filepath = Path(__file__).parent / "data" / "0.14-auto_icm45686-lsm6dsv320x" / "LOG_1794836370.bin"
     return CassCommands.process_stream_file(filepath)
 
 
@@ -67,7 +69,7 @@ def print_summary(data: StreamData):
             print(imu.events.to_string())
 
 
-def plot_imu_data(data: StreamData, port: str = "C"):
+def plot_imu_data(data: StreamData, port: str = "E"):
     """Plot one IMU's acceleration, rotation rate and magnetic field."""
     imu = data.imu[port]
     plt.style.use("ggplot")

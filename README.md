@@ -79,10 +79,11 @@ From firmware 0.13 every variant writes a stream of tagged blocks: the 500 Hz re
 From firmware 0.14 there is one firmware (`0.14-auto`) that detects what is on ports C and E (analog channels or an IMU). Its files (stream format v4) say what was found: `data.ports["C"]` / `data.ports["E"]` give each port's `state_name` (`"analog"`, `"imu"`, `"imu_no_mag"`), `device` and `i2c_addr`. The records only have the real analog channels, so with an IMU on port C there are no `c0`–`c2` columns, as with the 0.13 `i2c_320g` variant. 0.13 files (format v3) still parse; their `ports` is empty.
 
 ```python
-data = CassCommands.process_stream_file("LOG_1793290048.bin")
+data = CassCommands.process_stream_file("examples/data/0.14-auto_icm45686-lsm6dsv320x/LOG_1794836370.bin")
 data.records                 # 500 Hz analog channels
 data.imu["S"]                # the internal SPI ICM-20948
-imu = data.imu["C"]          # the IMU on port C (imu.device names it)
+data.ports                   # what was on ports C and E
+imu = data.imu["E"]          # the IMU on port E (imu.device names it)
 imu.accel, imu.gyro          # t, tmicros, x, y, z [mg] / [dps], t_edge, t_fit
 imu.accel_hg                 # LSM6DSV320X high-g accelerometer [mg] (±320 g); empty for the ICM-45686
 imu.mag, imu.timestamp       # [µT], raw IMU timestamp counter
