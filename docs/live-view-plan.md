@@ -86,7 +86,7 @@ The SNAPSHOT_IMU payload with what is on ports C and E between the record and th
 | 0 | 2 | `record_len` | `uint16`, `sizeof(datrec)`: 40 (all 18 channels) |
 | 2 | `record_len` | `record` | raw `datrec` bytes, the 18-channel layout (`dtype_analog_18`) |
 | 2+R | 4 | `analog_mask` | `uint32`, bit *n* set: field `a`*n* is a real analog channel; the fields of a port with an I2C device are 0. As in the stream format's `FILE_HEADER` |
-| 6+R | 4 | `pullup_mask` | `uint32`, bit *n* set: channel `a`*n* has the logger's internal 22 kΩ pull-up on. As in `FILE_HEADER` (0.14: port E's channels while it is analog) |
+| 6+R | 4 | `pullup_mask` | `uint32`, bit *n* set: channel `a`*n* has the logger's internal 22 kΩ pull-up on. As in `FILE_HEADER` (0.14: always 0) |
 | 10+R | 3 | `port_c` | `state`, `device_type`, `i2c_addr` (`StreamPortInfo`, `docs/stream-format.md`): 0 analog, 1 IMU, 2 IMU without its magnetometer, 3 fault, 4 IMU wired for the other port, 5 an IMU found earlier that no longer answers (4 and 5 are faults too) |
 | 13+R | 3 | `port_e` | the same for port E |
 | 16+R | 1 | `imu_on_analog` | bit *n* set: an I2C IMU is plugged into analog-only port `'A'` + *n* (A, B, D or F; the C and E bits are 0). A fault: `SENSOR_INIT_FAILED` is set |
