@@ -70,13 +70,13 @@ cass_utils = CassCommands()
 | Parse a logger file (default) | `CassCommands.process_stream_file(path, fw_ver=None)` | Any `.bin` file. Returns a `StreamData`: `records` (the 500 Hz DataFrame of analog channels) and `imu` with per-sensor DataFrames per IMU: `"S"` the internal ICM-20948, `"C"` / `"E"` the port IMUs. Firmware 0.13+ files describe themselves; older files need `fw_ver` (e.g. from `metadata.txt`), and their IMUs come from the records, one sample each |
 | Parse records only | `CassCommands.process_data_file(path)` | The 500 Hz records as a DataFrame with a `t` (seconds) column. Pass `fw_ver` for pre-0.13 files from I2C variants. From 0.13 the IMUs aren't in the records, so this has the analog channels only |
 | Parse FIT file | `CassCommands.process_fit_file(dir, filename)` | Parses a `.fit` file into `(df_session, df_record)` DataFrames |
-| Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID |
+| Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID. Without one (0.13+ downloads), reads them from the `.bin` files' headers |
 
 #### Block stream files
 
 From firmware 0.13 every variant writes a stream of tagged blocks: the 500 Hz record is one block type, and each IMU's FIFO readings come in their own blocks with a time for every sample, at the IMU's own rate (internal ICM-20948 ~1.13 kHz, ICM-45686 ~819 Hz, LSM6DSV320X ~937 Hz). The spec is `docs/stream-format.md` in cass-logger-fw; the parser is `cass_logger_dev/stream_format.py`.
 
-From firmware 0.14 there is one firmware (`0.14-auto`) that detects what is on ports C and E (analog channels or an IMU). Its files (stream format v4) say what was found: `data.ports["C"]` / `data.ports["E"]` give each port's `state_name` (`"analog"`, `"imu"`, `"imu_no_mag"`), `device` and `i2c_addr`. The records only have the real analog channels, so with an IMU on port C there are no `c0`–`c2` columns, as with the 0.13 `i2c_320g` variant. 0.13 files (format v3) still parse; their `ports` is empty.
+From firmware 0.14 there is one firmware (`0.14-auto`) that detects what is on ports C and E (analog channels or an IMU). Its files (stream format v4) say what was found: `data.ports["C"]` / `data.ports["E"]` give each port's `state_name` (`"analog"`, `"imu"`, `"imu_no_mag"`, or a fault: `"fault"`, `"wrong_port"`, `"imu_lost"`), `device` and `i2c_addr`. The records only have the real analog channels, so with an IMU on port C there are no `c0`–`c2` columns, as with the 0.13 `i2c_320g` variant. 0.13 files (format v3) still parse; their `ports` is empty.
 
 ```python
 data = CassCommands.process_stream_file("examples/data/0.14-auto_icm45686-lsm6dsv320x/LOG_1794836370.bin")

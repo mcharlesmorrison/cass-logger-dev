@@ -269,7 +269,7 @@ class ImuData:
     Every frame has ``tmicros`` (µs) and ``t`` (s) on the same zero as the
     records DataFrame, and two flags for how good the time is: ``t_edge``, the
     sample's INT1 edge (LSM6DSV320X), and ``t_fit``, from a converged fit of the
-    IMU's sample clock (ICM-45686, which has no INT pin wired). With neither,
+    IMU's sample clock (ICM-20948, ICM-45686, which have no INT pin wired). With neither,
     the time is an estimate (timing lost; see ``events``). Accelerometers are in
     mg, the gyro in dps and the magnetometer in µT, like the other variants.
     """
