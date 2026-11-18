@@ -227,3 +227,147 @@ def test_snapshot_timeout_clears_input():
     with pytest.raises(TimeoutError, match="too old"):
         cass.snapshot("0.11-std", timeout=0.05)
     assert cass._ser_data.resets >= 1
+
+
+# ── SNAPSHOT_IMU frames (firmware 0.13+) ─────────────────────────────────────
+
+from cass_logger_dev.live import (  # noqa: E402
+    FRAME_SNAPSHOT_IMU,
+    LIVE_IMU,
+    LIVE_IMU_ACCEL,
+    LIVE_IMU_GYRO,
+    LIVE_IMU_HG,
+    LIVE_IMU_MAG,
+)
+
+
+def make_imu_payload(fw_ver: str, imus: list, seed: int = 1) -> tuple[bytes, np.ndarray]:
+    record, rec = make_payload(fw_ver, seed)
+    body = struct.pack("<H", len(record)) + record + bytes([len(imus)])
+    for port, valid, values in imus:
+        body += LIVE_IMU.pack(3 if port == "S" else 1, 1, port.encode(), valid, *values)
+    return body, rec
+
+
+def test_snapshot_imu_frame_decodes_to_record_style_columns():
+    fw = "0.13-i2c_45686"
+    vals_s = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0, 0.0, 0.0]
+    vals_c = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    payload, rec = make_imu_payload(fw, [("S", LIVE_IMU_ACCEL | LIVE_IMU_GYRO | LIVE_IMU_MAG, vals_s),
+                                         ("C", LIVE_IMU_ACCEL | LIVE_IMU_GYRO, vals_c)])  # no mag
+    frame = FrameParser().feed(make_frame(payload, frame_type=FRAME_SNAPSHOT_IMU))[0]
+    snap = decode_frame(frame, fw)
+    assert list(snap.values) == live_columns(fw)
+    assert snap.values["tmicros"] == rec["tmicros"]
+    assert (snap.values["gx"], snap.values["wy"], snap.values["Tz"]) == (1.0, 5.0, 9.0)
+    assert (snap.values["gx_i2c_c"], snap.values["wz_i2c_c"]) == (10.0, 60.0)
+    assert np.isnan(snap.values["Tx_i2c_c"])  # not read
+
+
+def test_snapshot_imu_frame_high_g():
+    fw = "0.13-i2c_320g"
+    vals = [0.0] * 9 + [100.0, 200.0, 300.0]
+    payload, _ = make_imu_payload(fw, [("C", LIVE_IMU_HG, vals)])
+    snap = decode_frame(FrameParser().feed(make_frame(payload, frame_type=FRAME_SNAPSHOT_IMU))[0], fw)
+    assert snap.values["hgz_i2c_c"] == 300.0
+    assert np.isnan(snap.values["gx"])  # the internal IMU missing from the frame
+
+
+@pytest.mark.parametrize("fw_ver,imu_cols", [
+    ("0.12-std", ["gx", "Tz"]),                       # in the record
+    ("0.13-std", ["gx", "Tz"]),                       # internal FIFO IMU
+    ("0.13-i2c_45686_2", ["gx", "Tz_i2c_c", "Tz_i2c_e"]),
+    ("0.13-i2c_320g", ["gx", "hgx_i2c_c"]),
+])
+def test_live_columns_include_imus(fw_ver, imu_cols):
+    cols = live_columns(fw_ver)
+    assert all(c in cols for c in imu_cols)
+    assert len(cols) == len(set(cols))
+
+
+def test_snapshot_imu_frame_bad_length():
+    payload, _ = make_imu_payload("0.13-std", [("S", LIVE_IMU_ACCEL, [0.0] * 12)])
+    with pytest.raises(ValueError):
+        decode_frame(FrameParser().feed(make_frame(payload[:-4], frame_type=FRAME_SNAPSHOT_IMU))[0], "0.13-std")
+
+
+def test_snapshot_accepts_imu_frames():
+    payload, rec = make_imu_payload("0.13-std", [("S", LIVE_IMU_ACCEL, [1.0] * 12)])
+    cass = make_cass(make_frame(payload, frame_type=FRAME_SNAPSHOT_IMU))
+    snap = cass.snapshot("0.13-std")
+    assert snap.values["gx"] == 1.0 and snap.values["tmicros"] == rec["tmicros"]
+
+
+# ── SNAPSHOT_PORTS (firmware 0.14, one "auto" firmware) ──────────────────────
+
+from cass_logger_dev.live import (  # noqa: E402
+    FLAG_IMU_FAILING,
+    FLAG_PORT_WARNING,
+    FRAME_SNAPSHOT_PORTS,
+)
+from cass_logger_dev.stream_format import PORT_ANALOG, PORT_IMU_NO_MAG, PORT_IMU_OK  # noqa: E402
+
+AUTO = "0.14-auto"
+
+
+def make_ports_payload(mask: int, ports, imus: list, seed: int = 1,
+                       imu_on_analog: int = 0, pullup_mask: int = 0) -> tuple[bytes, np.ndarray]:
+    record, rec = make_payload(AUTO, seed)
+    body = struct.pack("<H", len(record)) + record + struct.pack("<II3B3BB", mask, pullup_mask, *ports[0],
+                                                                 *ports[1], imu_on_analog)
+    body += bytes([len(imus)])
+    for port, valid, values in imus:
+        body += LIVE_IMU.pack(3 if port == "S" else 1, 4, port.encode(), valid, *values)
+    return body, rec
+
+
+def test_snapshot_ports_frame():
+    mask = 0x3FFFF & ~(0x7 << 9)  # port C has an IMU
+    ports = ((PORT_IMU_OK, 4, 0x6B), (PORT_ANALOG, 0, 0))
+    vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+    payload, rec = make_ports_payload(mask, ports, [("C", LIVE_IMU_ACCEL | LIVE_IMU_HG, vals)])
+    assert len(payload) == 2 + 40 + 4 + 4 + 6 + 1 + 1 + 52  # as the firmware sends it
+    frame = FrameParser().feed(make_frame(payload, frame_type=FRAME_SNAPSHOT_PORTS))[0]
+    snap = decode_frame(frame, AUTO)
+    assert list(snap.values) == live_columns(AUTO)
+    assert snap.values["d0"] == rec["d0"] and snap.values["e2"] == rec["e2"]
+    assert all(np.isnan(snap.values[c]) for c in ("c0", "c1", "c2"))  # not real channels
+    assert snap.values["gx_i2c_c"] == 1.0 and snap.values["hgz_i2c_c"] == 12.0
+    assert np.isnan(snap.values["wx_i2c_c"]) and np.isnan(snap.values["gx_i2c_e"])
+    assert snap.analog_mask == mask and snap.pullup_mask == 0
+    assert snap.ports["C"].device == "LSM6DSV320X + QMC6309" and snap.ports["E"].is_analog
+    assert not (snap.port_warning or snap.imu_failing or snap.sensor_init_failed)
+    assert snap.imu_on_analog == []
+
+
+def test_snapshot_ports_imu_on_analog_port():
+    ports = ((PORT_ANALOG, 0, 0), (PORT_ANALOG, 0, 0))
+    payload, _ = make_ports_payload(0x3FFFF, ports, [], imu_on_analog=0b100001,  # A and F
+                                    pullup_mask=0x38)
+    snap = decode_frame(FrameParser().feed(
+        make_frame(payload, flags=FLAG_SENSOR_INIT_FAILED, frame_type=FRAME_SNAPSHOT_PORTS))[0], AUTO)
+    assert snap.sensor_init_failed and snap.imu_on_analog == ["A", "F"] and snap.pullup_mask == 0x38
+
+
+def test_snapshot_ports_flags():
+    ports = ((PORT_IMU_NO_MAG, 4, 0x6B), (PORT_ANALOG, 0, 0))
+    payload, _ = make_ports_payload(0x3FFFF & ~(0x7 << 9), ports, [])
+    snap = decode_frame(FrameParser().feed(
+        make_frame(payload, flags=FLAG_PORT_WARNING, frame_type=FRAME_SNAPSHOT_PORTS))[0], AUTO)
+    assert snap.port_warning and snap.ports["C"].state == PORT_IMU_NO_MAG
+    # While recording: no payload, but the flag says a port IMU stopped answering.
+    snap = decode_frame(FrameParser().feed(
+        make_frame(flags=FLAG_LOGGING | FLAG_IMU_FAILING, frame_type=FRAME_SNAPSHOT_PORTS))[0], AUTO)
+    assert snap.logging and snap.imu_failing and snap.values is None and snap.ports is None
+
+
+def test_live_columns_auto_cover_every_port():
+    cols = live_columns(AUTO)
+    assert {"c0", "e0", "gx", "gx_i2c_c", "hgx_i2c_c", "gx_i2c_e", "hgx_i2c_e"} <= set(cols)
+    assert len(cols) == len(set(cols))
+
+
+def test_snapshot_ports_bad_length():
+    payload, _ = make_ports_payload(0x3FFFF, ((0, 0, 0), (0, 0, 0)), [("S", LIVE_IMU_ACCEL, [0.0] * 12)])
+    with pytest.raises(ValueError):
+        decode_frame(FrameParser().feed(make_frame(payload[:-4], frame_type=FRAME_SNAPSHOT_PORTS))[0], AUTO)

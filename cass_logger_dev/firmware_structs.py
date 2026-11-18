@@ -4,7 +4,7 @@ NumPy dtype definitions and column orderings for each Cass Logger firmware varia
 Exports
 -------
 FIRMWARE_DTYPES : dict
-    Maps firmware key strings ("std", "i2c_1", "i2c_2") to their dtype constructor.
+    Maps record layout keys ("std", "i2c_1", "analog_15", ...) to their dtype constructor.
 COLUMN_ORDERS : dict
     Maps firmware key strings to the preferred DataFrame column order.
 """
@@ -217,7 +217,93 @@ def dtype_i2c_2():
     )
 
 
+# ── Records from firmware 0.13: every variant writes the block stream format ──
+# The internal SPI ICM-20948 (and any ICM-45686 / LSM6DSV320X) is in FIFO
+# blocks, so the records hold only the analog channels. (i2c_1 / i2c_2, with a
+# polled I2C ICM-20948 in the record, were dropped in 0.13.)
+
+def dtype_analog_18():
+    """Return the NumPy dtype for the std record from firmware 0.13: 18 analog channels."""
+    return np.dtype(
+        [
+            ("tmicros", "i4"),
+            ("d0", "i2"),
+            ("d1", "i2"),
+            ("d2", "i2"),
+            ("e0", "i2"),
+            ("e1", "i2"),
+            ("e2", "i2"),
+            ("f0", "i2"),
+            ("f1", "i2"),
+            ("f2", "i2"),
+            ("c0", "i2"),
+            ("c1", "i2"),
+            ("c2", "i2"),
+            ("a0", "i2"),
+            ("a1", "i2"),
+            ("a2", "i2"),
+            ("b0", "i2"),
+            ("b1", "i2"),
+            ("b2", "i2"),
+        ]
+    )
+
+
+def dtype_analog_15():
+    """Return the NumPy dtype for the record of a variant with a FIFO IMU on
+    Port C (i2c_320g, i2c_45686), from firmware 0.13: 15 analog channels (no
+    c0-c2)."""
+    return np.dtype(
+        [
+            ("tmicros", "i4"),
+            ("d0", "i2"),
+            ("d1", "i2"),
+            ("d2", "i2"),
+            ("e0", "i2"),
+            ("e1", "i2"),
+            ("e2", "i2"),
+            ("f0", "i2"),
+            ("f1", "i2"),
+            ("f2", "i2"),
+            ("a0", "i2"),
+            ("a1", "i2"),
+            ("a2", "i2"),
+            ("b0", "i2"),
+            ("b1", "i2"),
+            ("b2", "i2"),
+            # Struct padding to a multiple of 4 bytes (the uint32 microtime).
+            ("_pad", "u2"),
+        ]
+    )
+
+
+def dtype_analog_12():
+    """Return the NumPy dtype for the record of a variant with FIFO IMUs on
+    Ports C and E (i2c_320g_2, i2c_45686_2), from firmware 0.13: 12 analog
+    channels (no c0-c2, e0-e2)."""
+    return np.dtype(
+        [
+            ("tmicros", "i4"),
+            ("d0", "i2"),
+            ("d1", "i2"),
+            ("d2", "i2"),
+            ("f0", "i2"),
+            ("f1", "i2"),
+            ("f2", "i2"),
+            ("a0", "i2"),
+            ("a1", "i2"),
+            ("a2", "i2"),
+            ("b0", "i2"),
+            ("b1", "i2"),
+            ("b2", "i2"),
+        ]
+    )
+
+
 FIRMWARE_DTYPES = {
+    "analog_18": dtype_analog_18,
+    "analog_15": dtype_analog_15,
+    "analog_12": dtype_analog_12,
     "i2c_2": dtype_i2c_2,
     "i2c_1": dtype_i2c_1,
     "i2c_1_legacy": dtype_i2c_1_legacy,
@@ -226,6 +312,63 @@ FIRMWARE_DTYPES = {
 """Maps firmware key string to its dtype constructor function."""
 
 COLUMN_ORDERS = {
+    "analog_18": [
+        "tmicros",
+        "t",
+        "a0",
+        "a1",
+        "a2",
+        "b0",
+        "b1",
+        "b2",
+        "c0",
+        "c1",
+        "c2",
+        "d0",
+        "d1",
+        "d2",
+        "e0",
+        "e1",
+        "e2",
+        "f0",
+        "f1",
+        "f2",
+    ],
+    "analog_15": [
+        "tmicros",
+        "t",
+        "a0",
+        "a1",
+        "a2",
+        "b0",
+        "b1",
+        "b2",
+        "d0",
+        "d1",
+        "d2",
+        "e0",
+        "e1",
+        "e2",
+        "f0",
+        "f1",
+        "f2",
+    ],
+    "analog_12": [
+        "tmicros",
+        "t",
+        "a0",
+        "a1",
+        "a2",
+        "b0",
+        "b1",
+        "b2",
+        "d0",
+        "d1",
+        "d2",
+        "f0",
+        "f1",
+        "f2",
+    ],
     "i2c_2": [
         "tmicros",
         "t",

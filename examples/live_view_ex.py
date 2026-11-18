@@ -1,8 +1,8 @@
 """
 Firmware bench tool: poll live view snapshots and print every channel.
 
-This is for firmware development and bench checks (see Phase 1.4 in
-``docs/live-view-plan.md``), not a product feature. Live view for users runs
+This is for firmware development and bench checks (protocol:
+``docs/live-protocol.md``), not a product feature. Live view for users runs
 in the Cass Logger app.
 
 It sends ``'k'`` at ``--rate`` Hz using ``CassCommands.snapshot()`` and

@@ -6,7 +6,13 @@ Typical usage
     cass = CassCommands()
     files = cass.list_files()
     dir_path = cass.download_all()
-    df = CassCommands.process_data_file(dir_path, files[0])
+    data = CassCommands.process_stream_file(Path(dir_path) / files[0])  # 0.13+ files
+    data.records          # 500 Hz analog channels
+    data.imu["S"].accel   # the internal IMU; "C" / "E" for port IMUs
+
+    # Files from before firmware 0.13 need their fw_ver (from metadata.txt):
+    meta = CassCommands.find_and_parse_metadata(dir_path)
+    data = CassCommands.process_stream_file(Path(dir_path) / files[0], meta["firmware_version"])
 
 Notes
 -----
@@ -27,8 +33,18 @@ from .firmware_structs import (
     FIRMWARE_DTYPES,
     COLUMN_ORDERS,
 )
+from .stream_format import (
+    StreamData,
+    fix_icm45686_gyro_units,
+    is_stream_file,
+    read_file_info,
+    legacy_stream_data,
+    process_stream,
+    read_stream,
+    records_frame,
+)
 from .live import (
-    FRAME_SNAPSHOT,
+    SNAPSHOT_FRAMES,
     FrameParser,
     Snapshot,
     decode_frame,
@@ -37,6 +53,9 @@ from .live import (
 from typing import Optional, Union, Dict, List
 import re
 import platform
+
+# Longest device ID the firmware stores (DEVICE_ID_LEN in cass-logger-fw commands.h).
+DEVICE_ID_MAX_LEN = 5
 
 
 class CassCommands:
@@ -408,12 +427,9 @@ class CassCommands:
         filename_term = bytes(filename_term, "utf-8")
 
         sd_buff_size = 5120
-        num_buffs = file_size / sd_buff_size
-        fractional_buffs = num_buffs - int(num_buffs)
-        # TODO: add fractional buffer transfer at end
-        if file_size % sd_buff_size != 0:
-            num_buffs = file_size // sd_buff_size  # skip last incomplete sd_buffer
-        num_buffs = int(num_buffs)
+        # The device sends a whole buffer per 't', padded past the end of the
+        # file, so the last partial buffer is requested too and trimmed below.
+        num_buffs = -(-file_size // sd_buff_size)  # ceil
         bytes_received = []
 
         self.ser_command.write(b"o")  # open target file
@@ -466,9 +482,9 @@ class CassCommands:
             sd_byte_idx = 0
 
         # DEBUG
-        expected_byte_number = num_buffs * sd_buff_size
-        number_buffs_off = expected_byte_number - len(bytes_received)
+        number_buffs_off = num_buffs * sd_buff_size - len(bytes_received)
         print(f"Number of bytes short = {number_buffs_off} ({filename})")
+        bytes_received = bytes_received[:file_size]  # drop the last buffer's padding
 
         self.ser_command.write(b"c")  # close target file
         self._close_serial()
@@ -502,11 +518,12 @@ class CassCommands:
         return filepath
 
     def download_all(self):
-        """Download all files from the device and write a metadata file.
+        """Download all files from the device.
 
-        Files are saved to a timestamped directory (tmp_<unix>). A
-        metadata.txt file containing the firmware version and device ID
-        is written alongside them.
+        Files are saved to a timestamped directory (tmp_<unix>). If any of
+        them is a pre-0.13 file, a metadata.txt with the firmware version and
+        device ID is written alongside them; 0.13+ files carry both in their
+        FILE_HEADER (see ``needs_metadata_txt``).
 
         Returns
         -------
@@ -526,15 +543,29 @@ class CassCommands:
         ]
 
         self._flush_all()
-        # write metadata
-        fw_ver = self.get_fw_ver()
-        device_id = self.get_device_ID()
+        if self.needs_metadata_txt(Path(dir_name, f) for f in my_filenames):
+            self.write_metadata_txt(dir_name, self.get_fw_ver(), self.get_device_ID())
+
+        return filepaths[-1]
+
+    @staticmethod
+    def needs_metadata_txt(paths) -> bool:
+        """True if any of the downloaded files is a pre-0.13 file.
+
+        Those are raw datrec structs with no header, so the firmware version
+        and device ID have to go in a metadata.txt next to them. 0.13+ files
+        carry both in their FILE_HEADER.
+        """
+        return any(not is_stream_file(p) for p in paths)
+
+    @staticmethod
+    def write_metadata_txt(dir_name: Union[str, Path], fw_ver: str, device_id: str) -> Path:
+        """Write the metadata.txt that pre-0.13 downloads need."""
         md_path = Path(dir_name, "metadata.txt")
         with open(md_path, "w") as meta_file:
             meta_file.write(f"Firmware Ver: {fw_ver}\n")
             meta_file.write(f"Device ID: {device_id}\n")
-
-        return filepaths[-1]
+        return md_path
 
     def put_device_ID(self, device_ID):
         """Write a device identifier string to EEPROM.
@@ -542,13 +573,25 @@ class CassCommands:
         Parameters
         ----------
         device_ID : str
-            Identifier to write (must not contain 'x', used as terminator).
+            Identifier to write: 1 to ``DEVICE_ID_MAX_LEN`` printable ASCII
+            characters, without 'x' (the reply terminator).
 
         Returns
         -------
         bool
             True if the device echoed back the correct ID, False otherwise.
+
+        Raises
+        ------
+        ValueError
+            If ``device_ID`` isn't a valid ID. The firmware stores at most
+            ``DEVICE_ID_MAX_LEN`` characters and echoes what it stored, so a
+            longer ID would leave this waiting for an echo that never comes.
         """
+        if not (1 <= len(device_ID) <= DEVICE_ID_MAX_LEN):
+            raise ValueError(f"Device ID must be 1 to {DEVICE_ID_MAX_LEN} characters, got {device_ID!r}")
+        if not (device_ID.isascii() and device_ID.isprintable()) or "x" in device_ID:
+            raise ValueError(f"Device ID must be printable ASCII without 'x', got {device_ID!r}")
         self.ser_command.write(b"p")    # eeprom put
         device_ID_orig = device_ID
         device_ID += "x"
@@ -764,7 +807,7 @@ class CassCommands:
             n = ser_data.in_waiting
             if n:
                 for frame in parser.feed(ser_data.read(n)):
-                    if frame.frame_type == FRAME_SNAPSHOT:
+                    if frame.frame_type in SNAPSHOT_FRAMES:
                         return decode_frame(frame, fw_ver)
             if time.monotonic() > deadline:
                 ser_data.reset_input_buffer()
@@ -803,6 +846,7 @@ class CassCommands:
 
     # Maps firmware variant suffix to dtype key. Variants that share a
     # struct layout map to the same dtype key.
+    # Record layouts before firmware 0.13 (back-to-back datrec files).
     VARIANT_DTYPE_MAP = {
         "std":               "std",
         "std_DEF-dig":       "std",     # same 76-byte layout as std (D/E/F pins are pull-up digital)
@@ -813,8 +857,23 @@ class CassCommands:
         "i2c_45686_2":       "i2c_2",   # same 136-byte layout as i2c_2
     }
 
+    # Record layouts from firmware 0.13, when every variant moved to the block
+    # stream format (process_stream_file).
+    STREAM_LAYOUTS = {
+        "std":          "analog_18",
+        "std_DEF-dig":  "analog_18",
+        "i2c_45686":    "analog_15",
+        "i2c_45686_2":  "analog_12",
+        "i2c_320g":     "analog_15",
+        "i2c_320g_2":   "analog_12",
+        # 0.14+: one firmware that detects ports C and E. Always all 18 analog
+        # fields; the stream FILE_HEADER's analog_mask says which are real.
+        "auto":         "analog_18",
+    }
+    STREAM_FROM_VERSION = (0, 13)
+
     @classmethod
-    def get_dtype_key(cls, fw_ver: str) -> str:
+    def get_dtype_key(cls, fw_ver: str, record_len: Optional[int] = None) -> str:
         """Map a full firmware version string to its dtype/struct-layout key.
 
         Parameters
@@ -822,6 +881,9 @@ class CassCommands:
         fw_ver : str
             Full firmware version string, e.g. "0.10-i2c_2" or "0.09-std".
             Format is "<version>-<variant>" or just "<version>".
+        record_len : int, optional
+            The record's size in bytes, if known (stream file header, live view
+            frame). From 0.13 it's checked against the variant's layout.
 
         Returns
         -------
@@ -848,6 +910,14 @@ class CassCommands:
         if variant == "i2c_1" and legacy_version:
             return "i2c_1_legacy"
 
+        if version_tuple >= cls.STREAM_FROM_VERSION:
+            key = cls.STREAM_LAYOUTS.get(variant)
+            if key is None:
+                raise ValueError(f"No firmware {version} build of variant '{variant}' (from fw_ver='{fw_ver}')")
+            if record_len is not None and FIRMWARE_DTYPES[key]().itemsize != record_len:
+                raise ValueError(f"No {record_len}-byte record layout for '{fw_ver}'")
+            return key
+
         dtype_key = cls.VARIANT_DTYPE_MAP.get(variant)
         if dtype_key is None:
             raise ValueError(f"Unsupported firmware variant '{variant}' (from fw_ver='{fw_ver}')")
@@ -860,6 +930,14 @@ class CassCommands:
         The firmware version string determines which NumPy dtype is used for
         parsing. The tmicros column is zero-referenced and a 't' column
         (seconds, float64) is inserted.
+
+        Block stream files (every variant from 0.13) are detected from their
+        header, which also names the firmware, so ``fw_ver`` is ignored for
+        them. Only the 500 Hz analog records are returned (from 0.13 every IMU
+        is in FIFO blocks); use ``process_stream_file`` for the IMU data.
+
+        Pre-0.13 ICM-45686 gyro columns are returned in dps. Some 0.10 builds
+        wrote them in mdps; those are detected and converted, with a warning.
 
         Parameters
         ----------
@@ -883,6 +961,9 @@ class CassCommands:
         """
         full_filename = Path(full_filename)
 
+        if is_stream_file(full_filename):
+            return records_frame(read_stream(full_filename))[0]
+
         dtype_key = cls.get_dtype_key(fw_ver)
 
         try:
@@ -904,7 +985,40 @@ class CassCommands:
         # Only reorder columns that exist in this firmware's dtype
         df = df[[col for col in column_order if col in df.columns]]
 
-        return df
+        return fix_icm45686_gyro_units(df, fw_ver, full_filename.name)
+
+    @classmethod
+    def process_stream_file(cls, full_filename: Union[str, Path], fw_ver: Optional[str] = None) -> StreamData:
+        """Parse a logger file into DataFrames: a block stream file (every
+        variant from 0.13), or an older file given its ``fw_ver``.
+
+        Returns a ``StreamData``: ``records`` is the 500 Hz record DataFrame
+        (as from ``process_data_file``), and ``imu`` maps port letter ("C",
+        "E") to that IMU's FIFO data, one DataFrame per sensor (``accel``,
+        ``accel_hg``, ``gyro``, ``mag``, ``timestamp``) plus ``events`` and
+        ``reads``. All times share the records' zero. See
+        ``cass_logger_dev.stream_format`` for units and columns. The internal
+        SPI IMU is ``imu["S"]`` (from firmware 0.13 it's a FIFO source too).
+
+        This is the default way to read any logger file. Files from before
+        0.13 (back-to-back records) need ``fw_ver``; their IMUs, which were
+        polled into the records, are presented the same way, one sample per
+        record (see ``stream_format.legacy_stream_data``).
+
+        Raises
+        ------
+        ValueError
+            If a pre-0.13 file is given without ``fw_ver``, or ``fw_ver`` is
+            not a known variant.
+        StreamFormatError
+            If a stream file's header is unusable.
+        """
+        full_filename = Path(full_filename)
+        if is_stream_file(full_filename):
+            return process_stream(full_filename)
+        if fw_ver is None:
+            raise ValueError(f"{full_filename.name} is a pre-0.13 file: pass its fw_ver (e.g. from metadata.txt)")
+        return legacy_stream_data(cls.process_data_file(full_filename, fw_ver), fw_ver)
 
     @staticmethod
     def find_and_parse_metadata(
@@ -914,6 +1028,11 @@ class CassCommands:
         first_only: bool = True,
     ) -> Union[Dict[str, Optional[str]], List[Dict[str, Optional[str]]], None]:
         """Search for metadata files and return their parsed contents.
+
+        A download from 0.13+ firmware has no metadata.txt: its .bin files
+        carry the firmware version and device ID in their FILE_HEADER. When no
+        metadata file is found, those headers are returned instead, one dict
+        per block stream .bin file.
 
         Parameters
         ----------
@@ -936,16 +1055,28 @@ class CassCommands:
         files = CassCommands._find_metadata_files(
             dir_path, filename=filename, recursive=recursive
         )
-        if not files:
-            return None
-
         parsed = []
-        for f in files:
-            try:
-                parsed.append(CassCommands._parse_metadata_file(str(f)))
-            except Exception as exc:
-                # skip files that fail to read/parse; optionally log the error
-                parsed.append({"error": f"failed to parse {f}: {exc}"})
+        if files:
+            for f in files:
+                try:
+                    parsed.append(CassCommands._parse_metadata_file(str(f)))
+                except Exception as exc:
+                    # skip files that fail to read/parse; optionally log the error
+                    parsed.append({"error": f"failed to parse {f}: {exc}"})
+        else:
+            root = Path(dir_path)
+            bins = sorted(root.rglob("*.bin") if recursive else root.glob("*.bin"))
+            for f in bins:
+                try:
+                    info = read_file_info(f)
+                except Exception as exc:
+                    parsed.append({"error": f"failed to read the header of {f}: {exc}"})
+                    continue
+                if info is not None:
+                    parsed.append({"firmware_version": info.fw_version,
+                                   "device_id": info.device_id or None})
+        if not parsed:
+            return None
 
         if first_only:
             return parsed[0]

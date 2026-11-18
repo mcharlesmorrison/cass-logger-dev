@@ -30,6 +30,7 @@ Python package for developers to interface with the Cass Logger. This package al
    |--------|-------------|
    | `examples/load_and_plot_ex.py` | Load a pre-downloaded `.bin` file from `examples/data/` and plot potentiometer (fork/shock) data |
    | `examples/download_and_plot_ex.py` | Download data from a connected device, then plot internal IMU (accelerometer) data |
+   | `examples/load_and_plot_320g_ex.py` | Load a block stream file (LSM6DSV320X variants) from `examples/data/` and plot high-g/low-g acceleration, gyro and magnetometer data |
    | `examples/live_view_ex.py` | Firmware bench tool: poll live snapshots at `--rate` Hz and print every channel plus error counts (needs firmware 0.12+) |
 
    **macOS / Linux:**
@@ -66,9 +67,31 @@ cass_utils = CassCommands()
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Parse binary file | `CassCommands.process_data_file(path)` | Parses a `.bin` file into a pandas DataFrame with a `t` (seconds) column. Pass `fw_ver` if using an I2C firmware variant |
+| Parse a logger file (default) | `CassCommands.process_stream_file(path, fw_ver=None)` | Any `.bin` file. Returns a `StreamData`: `records` (the 500 Hz DataFrame of analog channels) and `imu` with per-sensor DataFrames per IMU: `"S"` the internal ICM-20948, `"C"` / `"E"` the port IMUs. Firmware 0.13+ files describe themselves; older files need `fw_ver` (e.g. from `metadata.txt`), and their IMUs come from the records, one sample each |
+| Parse records only | `CassCommands.process_data_file(path)` | The 500 Hz records as a DataFrame with a `t` (seconds) column. Pass `fw_ver` for pre-0.13 files from I2C variants. From 0.13 the IMUs aren't in the records, so this has the analog channels only |
 | Parse FIT file | `CassCommands.process_fit_file(dir, filename)` | Parses a `.fit` file into `(df_session, df_record)` DataFrames |
-| Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID |
+| Find metadata | `CassCommands.find_and_parse_metadata(dir)` | Searches a directory for `metadata.txt` and returns firmware version and device ID. Without one (0.13+ downloads), reads them from the `.bin` files' headers |
+
+#### Block stream files
+
+From firmware 0.13 every variant writes a stream of tagged blocks: the 500 Hz record is one block type, and each IMU's FIFO readings come in their own blocks with a time for every sample, at the IMU's own rate (internal ICM-20948 ~1.13 kHz, ICM-45686 ~819 Hz, LSM6DSV320X ~937 Hz). The spec is `docs/stream-format.md` in cass-logger-fw; the parser is `cass_logger_dev/stream_format.py`.
+
+From firmware 0.14 there is one firmware (`0.14-auto`) that detects what is on ports C and E (analog channels or an IMU). Its files (stream format v4) say what was found: `data.ports["C"]` / `data.ports["E"]` give each port's `state_name` (`"analog"`, `"imu"`, `"imu_no_mag"`, or a fault: `"fault"`, `"wrong_port"`, `"imu_lost"`), `device` and `i2c_addr`. The records only have the real analog channels, so with an IMU on port C there are no `c0`–`c2` columns, as with the 0.13 `i2c_320g` variant. 0.13 files (format v3) still parse; their `ports` is empty.
+
+```python
+data = CassCommands.process_stream_file("examples/data/0.14-auto_icm45686-lsm6dsv320x/LOG_1794836370.bin")
+data.records                 # 500 Hz analog channels
+data.imu["S"]                # the internal SPI ICM-20948
+data.ports                   # what was on ports C and E
+imu = data.imu["E"]          # the IMU on port E (imu.device names it)
+imu.accel, imu.gyro          # t, tmicros, x, y, z [mg] / [dps], t_edge, t_fit
+imu.accel_hg                 # LSM6DSV320X high-g accelerometer [mg] (±320 g); empty for the ICM-45686
+imu.mag, imu.timestamp       # [µT], raw IMU timestamp counter
+imu.events                   # FIFO overruns, failed/late reads, timing lost/re-established
+imu.reads                    # each FIFO read's time and entry count
+```
+
+All times share the records' zero. How good a sample's time is: `t_edge` is True when it's the sample's INT1 (data-ready) edge (LSM6DSV320X); `t_fit` when it comes from a converged fit of the IMU's own sample clock (ICM-20948, ICM-45686, which have no INT pin wired; ~1 s after recording starts). With neither, the time is an estimate; `events` shows where timing was lost.
 
 ### Device Configuration
 
@@ -76,7 +99,7 @@ cass_utils = CassCommands()
 |-----------|--------|-------------|
 | Set RTC time | `cass_utils.set_RTC_time()` | Syncs the device RTC to the current UTC time |
 | Get RTC time | `cass_utils.get_RTC_time()` | Reads the current RTC time from the device |
-| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"std"`, `"i2c_1"`, `"i2c_2"`) |
+| Get firmware version | `cass_utils.get_fw_ver()` | Returns the firmware version string (e.g. `"0.14-auto"`; 0.13 had a variant per configuration: `"0.13-std"`, `"0.13-i2c_45686"`, `"0.13-i2c_320g"`) |
 | Get device ID | `cass_utils.get_device_ID()` | Reads the device identifier stored in EEPROM |
 | Set device ID | `cass_utils.put_device_ID(id)` | Writes a device identifier string to EEPROM |
 | Get RTC install time | `cass_utils.get_rtc_install_timestamp()` | Reads the RTC battery install timestamp from EEPROM |
@@ -87,9 +110,9 @@ cass_utils = CassCommands()
 
 | Operation | Method | Description |
 |-----------|--------|-------------|
-| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError` |
+| Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError`. From 0.13 the IMU readings arrive alongside the record and are decoded into the same column names (`gx`…`Tz`, `gx_i2c_c`…); `live_columns(fw_ver)` lists them. From 0.14 (`auto`) the columns cover every channel a port could have; channels not on the device right now are NaN, and `Snapshot.ports`, `analog_mask`, `port_warning` (an IMU without its magnetometer) and `imu_failing` say what's there |
 
-Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-view-plan.md` for the spec.
+Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-protocol.md` for the spec.
 
 ## 🧪 Tests
 
