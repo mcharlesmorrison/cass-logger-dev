@@ -112,7 +112,7 @@ All times share the records' zero. How good a sample's time is: `t_edge` is True
 |-----------|--------|-------------|
 | Single snapshot | `cass_utils.get_snapshot()` | Reads every sensor channel once and returns a `Snapshot` (raw ADC counts and IMU values). Needs firmware 0.12+; older firmware raises `TimeoutError`. From 0.13 the IMU readings arrive alongside the record and are decoded into the same column names (`gx`…`Tz`, `gx_i2c_c`…); `live_columns(fw_ver)` lists them. From 0.14 (`auto`) the columns cover every channel a port could have; channels not on the device right now are NaN, and `Snapshot.ports`, `analog_mask`, `port_warning` (an IMU without its magnetometer) and `imu_failing` say what's there |
 
-Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-view-plan.md` for the spec.
+Live view (continuous polling with a chart) is driven from the Cass Logger app, not from this package. This package provides the protocol: the frame parser and decoder in `cass_logger_dev/live.py`, and `snapshot()` for repeated polling. See `docs/live-protocol.md` for the spec.
 
 ## 🧪 Tests
 

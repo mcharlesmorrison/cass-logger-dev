@@ -35,7 +35,7 @@ says what is on each port. ``Snapshot.imu_on_analog`` lists analog-only ports
 
 This module does no serial I/O, so it can be tested without hardware. The
 request/reply call lives in ``CassCommands.snapshot()``. Full spec:
-``docs/live-view-plan.md``.
+``docs/live-protocol.md``.
 """
 
 from __future__ import annotations
