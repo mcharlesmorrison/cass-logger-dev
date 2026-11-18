@@ -287,6 +287,7 @@ def test_icm20948_source():
     assert imu.mag["x"].iloc[0] == pytest.approx(15.0)     # 0.15 µT/LSB
 
 
+@pytest.mark.filterwarnings("ignore:.*written in mdps")  # see test_legacy_gyro_units.py
 def test_legacy_file_through_process_stream_file():
     if not LEGACY_LOG.exists():
         pytest.skip("example log not present")

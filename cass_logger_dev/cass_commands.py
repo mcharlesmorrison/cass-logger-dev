@@ -6,7 +6,13 @@ Typical usage
     cass = CassCommands()
     files = cass.list_files()
     dir_path = cass.download_all()
-    df = CassCommands.process_data_file(dir_path, files[0])
+    data = CassCommands.process_stream_file(Path(dir_path) / files[0])  # 0.13+ files
+    data.records          # 500 Hz analog channels
+    data.imu["S"].accel   # the internal IMU; "C" / "E" for port IMUs
+
+    # Files from before firmware 0.13 need their fw_ver (from metadata.txt):
+    meta = CassCommands.find_and_parse_metadata(dir_path)
+    data = CassCommands.process_stream_file(Path(dir_path) / files[0], meta["firmware_version"])
 
 Notes
 -----
@@ -29,6 +35,7 @@ from .firmware_structs import (
 )
 from .stream_format import (
     StreamData,
+    fix_icm45686_gyro_units,
     is_stream_file,
     read_file_info,
     legacy_stream_data,
@@ -929,6 +936,9 @@ class CassCommands:
         them. Only the 500 Hz analog records are returned (from 0.13 every IMU
         is in FIFO blocks); use ``process_stream_file`` for the IMU data.
 
+        Pre-0.13 ICM-45686 gyro columns are returned in dps. Some 0.10 builds
+        wrote them in mdps; those are detected and converted, with a warning.
+
         Parameters
         ----------
         full_filename : str
@@ -975,7 +985,7 @@ class CassCommands:
         # Only reorder columns that exist in this firmware's dtype
         df = df[[col for col in column_order if col in df.columns]]
 
-        return df
+        return fix_icm45686_gyro_units(df, fw_ver, full_filename.name)
 
     @classmethod
     def process_stream_file(cls, full_filename: Union[str, Path], fw_ver: Optional[str] = None) -> StreamData:

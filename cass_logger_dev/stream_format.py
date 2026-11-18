@@ -27,6 +27,7 @@ spec: ``docs/stream-format.md`` in cass-logger-fw.
 from __future__ import annotations
 
 import struct
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
@@ -635,6 +636,52 @@ def process_stream(source: Union[str, Path, bytes, StreamFile]) -> StreamData:
 _LEGACY_IMU_SUFFIXES = {"S": [""], "C": ["_i2c", "_i2c_c"], "E": ["_i2c_e"]}
 
 
+# One ICM-45686 gyro LSB at ±2000 dps, in mdps (2000 dps / 32768 × 1000).
+ICM45686_GYRO_MDPS_PER_LSB = 2000 / 32.768
+
+
+def gyro_in_mdps(values: np.ndarray) -> bool:
+    """True if pre-0.13 ICM-45686 gyro readings are in mdps instead of dps.
+
+    Firmware 0.10 built between 2026-07-07 and 2026-08-03 scaled the ICM-45686
+    gyro by FSR / 32.768 (mdps per LSB) instead of FSR / 32768 (dps), under the
+    same version string, so the data has to say which. In mdps every reading
+    is a whole number of 61.035 mdps LSBs, so no nonzero reading is smaller
+    than that. A dps recording always has nonzero readings below 61 dps (any
+    time the logger isn't spinning), so converted data never matches again.
+    """
+    v = np.asarray(values, dtype=np.float64).ravel()
+    v = v[np.isfinite(v) & (v != 0)]
+    if v.size == 0:
+        return False  # gyro off or never read: nothing to convert
+    lsbs = np.abs(v) / ICM45686_GYRO_MDPS_PER_LSB
+    whole = np.abs(lsbs - np.round(lsbs)) < 0.01
+    return bool((lsbs >= 0.99).mean() > 0.999 and whole.mean() > 0.999)
+
+
+def fix_icm45686_gyro_units(records: pd.DataFrame, fw_version: str, name: str = "") -> pd.DataFrame:
+    """A pre-0.13 record table with its ICM-45686 gyro columns in dps.
+
+    Returns ``records`` itself if nothing needs converting, else a copy with
+    the mdps columns divided by 1000 (and a warning). Only variants with an
+    ICM-45686 in the records ("45686" in the variant) are checked.
+    """
+    variant = fw_version.strip().split("-", 1)[1] if "-" in (fw_version or "") else "std"
+    if "45686" not in variant:
+        return records
+    for suffix in ("_i2c", "_i2c_c", "_i2c_e"):
+        cols = [f"w{axis}{suffix}" for axis in "xyz"]
+        if all(c in records.columns for c in cols) and gyro_in_mdps(records[cols].to_numpy()):
+            records = records.copy()
+            records[cols] = records[cols] / 1000.0
+            warnings.warn(
+                f"{name or 'records'}: ICM-45686 gyro columns {cols} were written in mdps "
+                "(firmware 0.10 built 2026-07-07 to 08-03); converted to dps.",
+                stacklevel=3,
+            )
+    return records
+
+
 def _empty_frame(*cols: str) -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype=float) for c in ("tmicros", "t") + cols})
 
@@ -643,12 +690,14 @@ def legacy_stream_data(records: pd.DataFrame, fw_version: str) -> StreamData:
     """A legacy (pre-0.13) file's records as a StreamData.
 
     ``records`` is the DataFrame from ``CassCommands.process_data_file`` and is
-    kept as-is (IMU columns included). Each IMU in it also gets an ``ImuData``
-    built from its record columns: one sample per record (500 Hz), timed by the
-    record (``t_edge`` and ``t_fit`` False), with no timestamp, event or read
-    tables.
+    kept as-is (IMU columns included), except that ICM-45686 gyro columns
+    written in mdps are converted to dps (see ``fix_icm45686_gyro_units``).
+    Each IMU in it also gets an ``ImuData`` built from its record columns: one
+    sample per record (500 Hz), timed by the record (``t_edge`` and ``t_fit``
+    False), with no timestamp, event or read tables.
     """
     variant = fw_version.split("-", 1)[1] if "-" in fw_version else "std"
+    records = fix_icm45686_gyro_units(records, fw_version)  # a no-op for process_data_file's output
     data = StreamData(fw_version, records)
     for port, suffixes in _LEGACY_IMU_SUFFIXES.items():
         s = next((s for s in suffixes if f"gx{s}" in records.columns), None)
