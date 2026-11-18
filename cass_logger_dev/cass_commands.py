@@ -873,7 +873,9 @@ class CassCommands:
     STREAM_FROM_VERSION = (0, 13)
 
     @classmethod
-    def get_dtype_key(cls, fw_ver: str, record_len: Optional[int] = None) -> str:
+    def get_dtype_key(
+        cls, fw_ver: str, record_len: Optional[int] = None, legacy_file: bool = False
+    ) -> str:
         """Map a full firmware version string to its dtype/struct-layout key.
 
         Parameters
@@ -884,6 +886,12 @@ class CassCommands:
         record_len : int, optional
             The record's size in bytes, if known (stream file header, live view
             frame). From 0.13 it's checked against the variant's layout.
+        legacy_file : bool, optional
+            True for a file with no stream header (back-to-back datrec
+            structs). Its layout comes from the variant alone
+            (``VARIANT_DTYPE_MAP``), whatever the version number: some builds
+            numbered 0.13 still wrote this format (e.g. "0.13-std_DEF-dig",
+            the std layout). Default False.
 
         Returns
         -------
@@ -910,7 +918,7 @@ class CassCommands:
         if variant == "i2c_1" and legacy_version:
             return "i2c_1_legacy"
 
-        if version_tuple >= cls.STREAM_FROM_VERSION:
+        if version_tuple >= cls.STREAM_FROM_VERSION and not legacy_file:
             key = cls.STREAM_LAYOUTS.get(variant)
             if key is None:
                 raise ValueError(f"No firmware {version} build of variant '{variant}' (from fw_ver='{fw_ver}')")
@@ -919,6 +927,12 @@ class CassCommands:
             return key
 
         dtype_key = cls.VARIANT_DTYPE_MAP.get(variant)
+        if dtype_key is None and legacy_file and variant in cls.STREAM_LAYOUTS:
+            raise ValueError(
+                f"File has no stream header, but firmware '{fw_ver}' only writes "
+                "stream files (was its fw_ver taken from a metadata.txt written "
+                "by newer firmware?)"
+            )
         if dtype_key is None:
             raise ValueError(f"Unsupported firmware variant '{variant}' (from fw_ver='{fw_ver}')")
         return dtype_key
@@ -964,7 +978,8 @@ class CassCommands:
         if is_stream_file(full_filename):
             return records_frame(read_stream(full_filename))[0]
 
-        dtype_key = cls.get_dtype_key(fw_ver)
+        # No stream header: the layout comes from the variant, not the version.
+        dtype_key = cls.get_dtype_key(fw_ver, legacy_file=True)
 
         try:
             dt = FIRMWARE_DTYPES[dtype_key]()
